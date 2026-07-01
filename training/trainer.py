@@ -159,27 +159,39 @@ class Trainer:
 
     def infer_move(self, board: np.ndarray, legal_moves: list[int]) -> int | None:
         """Infer one move from the latest trained model; returns None when unavailable."""
-        if not legal_moves:
-            return None
+        moves = self.infer_moves_batch([(board, legal_moves)])
+        return moves[0] if moves else None
+
+    def infer_moves_batch(self, requests: list[tuple[np.ndarray, list[int]]]) -> list[int | None]:
+        """Infer legal best moves for a batch of boards in one forward pass."""
+        if not requests:
+            return []
 
         with self._lock:
             if self._torch is None or self._model is None or self.step <= 0:
-                return None
+                return [None for _ in requests]
 
             torch = self._torch
             assert torch is not None
-            board_size = int(board.shape[-1])
-            action_dim = board_size * board_size
-            x = torch.from_numpy(board.astype(np.float32)).reshape(1, 1, board_size, board_size).to(self.device)
+
+            boards = [np.asarray(board, dtype=np.float32) for board, _ in requests]
+            board_size = int(boards[0].shape[-1])
+            batch = np.stack(boards, axis=0)
+            x = torch.from_numpy(batch).reshape(len(boards), 1, board_size, board_size).to(self.device)
 
             self._model.eval()
             with torch.no_grad():
                 policy_logits, _ = self._model(x)
             self._model.train()
 
-            logits = policy_logits[0].detach().cpu().numpy()
-            legal_idx = np.asarray(legal_moves, dtype=np.int64)
-            best_legal = int(legal_idx[np.argmax(logits[legal_idx])])
-            if best_legal >= action_dim:
-                return None
-            return best_legal
+            logits_np = policy_logits.detach().cpu().numpy()
+            moves: list[int | None] = []
+            action_dim = board_size * board_size
+            for i, (_, legal_moves) in enumerate(requests):
+                if not legal_moves:
+                    moves.append(None)
+                    continue
+                legal_idx = np.asarray(legal_moves, dtype=np.int64)
+                best_legal = int(legal_idx[np.argmax(logits_np[i, legal_idx])])
+                moves.append(best_legal if best_legal < action_dim else None)
+            return moves

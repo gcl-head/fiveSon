@@ -117,7 +117,7 @@ class GameService:
 
     def _pick_ai_move_with_generation(self, state: BoardState, generation: int, use_model: bool = True) -> int:
         legal = self._board.legal_moves(state)
-        if use_model:
+        if use_model and generation > 0:
             model_move = training_bridge.select_model_move(state.board, legal)
             if model_move is not None:
                 return model_move
@@ -135,6 +135,21 @@ class GameService:
         if best_move is not None:
             return int(best_move)
         return int(np.random.choice(legal))
+
+    def _pick_stochastic_heuristic_move(self, state: BoardState) -> int:
+        legal = self._board.legal_moves(state)
+        if not legal:
+            return -1
+        heuristic_policy = self._heuristic.get_policy(state.board.tolist(), state.to_play)
+        probs = np.array([
+            max(0.0, float(heuristic_policy.get(divmod(move, self._board.size), 0.0))) for move in legal
+        ], dtype=np.float64)
+        prob_sum = float(probs.sum())
+        if prob_sum <= 0.0:
+            return int(np.random.choice(legal))
+        probs /= prob_sum
+        idx = int(np.random.choice(np.arange(len(legal)), p=probs))
+        return int(legal[idx])
 
     def _pick_ai_move(self, state: BoardState) -> int:
         generation = training_bridge.deployed_generation()
@@ -154,15 +169,36 @@ class GameService:
             state = self._board.initial_state()
             challenger_is_black = (i % 2 == 0)
 
+            opening_noise = min(2, len(self._board.legal_moves(state)))
+            for _ in range(opening_noise):
+                legal = self._board.legal_moves(state)
+                if not legal or self._board.terminal(state):
+                    break
+                state = self._board.apply(state, int(np.random.choice(legal)))
+
             while not self._board.terminal(state):
                 challenger_turn = (state.to_play == 1 and challenger_is_black) or (
                     state.to_play == -1 and not challenger_is_black
                 )
-                move = self._pick_ai_move_with_generation(
-                    state,
-                    generation if challenger_turn else baseline_generation,
-                    use_model=challenger_turn,
-                )
+                if challenger_turn:
+                    if np.random.random() < 0.08:
+                        move = self._pick_stochastic_heuristic_move(state)
+                    else:
+                        move = self._pick_ai_move_with_generation(
+                            state,
+                            generation,
+                            use_model=True,
+                        )
+                else:
+                    # Baseline generation 0 intentionally behaves like bootstrap policy.
+                    if baseline_generation > 0:
+                        move = self._pick_ai_move_with_generation(
+                            state,
+                            baseline_generation,
+                            use_model=True,
+                        )
+                    else:
+                        move = self._pick_stochastic_heuristic_move(state)
                 state = self._board.apply(state, move)
 
             total_moves += state.move_count

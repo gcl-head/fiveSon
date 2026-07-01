@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import time
+from concurrent.futures import Future, ProcessPoolExecutor
+from multiprocessing import get_context
+from multiprocessing.connection import Connection
 from pathlib import Path
 from threading import Lock
+
+import numpy as np
 
 from arena.matchmaker import Arena
 from backend.core.runtime import runtime_registry
 from backend.core.settings import choose_device_config, load_app_config, load_yaml
 from backend.services.training_bridge import training_bridge
 from replay_buffer.prioritized import PrioritizedReplayBuffer
-from self_play.worker import SelfPlayWorker
+from self_play.process_worker import ProcessSelfPlayTask, play_one_game_process
+from self_play.worker import SelfPlayResult
 from training.trainer import Trainer
 
 
@@ -40,7 +46,8 @@ class Orchestrator:
         )
         self._active_games: dict[int, dict[str, object]] = {}
         self._active_games_lock = Lock()
-        self.workers: list[SelfPlayWorker] = []
+        self._self_play_games_completed = 0
+        self._self_play_pool: ProcessPoolExecutor | None = None
         self.trainer = Trainer(
             self.replay,
             batch_size=self.device_cfg.batch_size,
@@ -71,34 +78,77 @@ class Orchestrator:
     def _set_parallel_self_play_games(self, count: int) -> None:
         count = max(1, min(32, int(count)))
         self._parallel_self_play_games = count
-        self_play_cfg = self.raw_cfg.get("self_play", {})
-        opening_noise_moves = int(self_play_cfg.get("random_opening_moves", 2))
-        exploration_epsilon = float(self_play_cfg.get("exploration_epsilon", 0.08))
-        heuristic_bootstrap_games = int(self_play_cfg.get("heuristic_bootstrap_games", 80))
-        heuristic_mix_ratio = float(self_play_cfg.get("heuristic_mix_ratio", 0.25))
-        prune_keep_ratio = float(self_play_cfg.get("heuristic_prune_keep_ratio", 0.6))
-        self.workers = [
-            SelfPlayWorker(
-                board_size=self.app_cfg.board_size,
-                win_length=self.app_cfg.win_length,
-                model_move_fn=self.trainer.infer_move,
-                temperature=float(self.raw_cfg.get("mcts", {}).get("temperature", 1.0)),
-                worker_id=i,
-                progress_cb=self._on_game_progress,
-                random_opening_moves=opening_noise_moves,
-                exploration_epsilon=exploration_epsilon,
-                bootstrap_games=heuristic_bootstrap_games,
-                heuristic_mix_ratio=heuristic_mix_ratio,
-                prune_keep_ratio=prune_keep_ratio,
-            )
-            for i in range(count)
-        ]
+        if self._self_play_pool is not None:
+            self._self_play_pool.shutdown(wait=False, cancel_futures=True)
+        self._self_play_pool = ProcessPoolExecutor(max_workers=count, mp_context=get_context("spawn"))
         with self._active_games_lock:
             self._active_games = {}
         runtime_registry.update(
             parallel_self_play_games=count,
             active_games=[],
         )
+
+    async def _run_self_play_cycle(self) -> list[SelfPlayResult]:
+        if self._self_play_pool is None:
+            self._set_parallel_self_play_games(self._parallel_self_play_games)
+        assert self._self_play_pool is not None
+
+        self_play_cfg = self.raw_cfg.get("self_play", {})
+        total_games = max(
+            self._parallel_self_play_games,
+            int(self_play_cfg.get("games_per_cycle", self._parallel_self_play_games)),
+        )
+        tasks: list[tuple[Future[SelfPlayResult], Connection, Connection]] = []
+        for game_index in range(total_games):
+            worker_id = game_index % self._parallel_self_play_games
+            parent_conn, child_conn = get_context("spawn").Pipe(duplex=True)
+            payload = ProcessSelfPlayTask(
+                worker_id=worker_id,
+                played_games=self._self_play_games_completed + game_index,
+                board_size=self.app_cfg.board_size,
+                win_length=self.app_cfg.win_length,
+                temperature=float(self.raw_cfg.get("mcts", {}).get("temperature", 1.0)),
+                random_opening_moves=int(self_play_cfg.get("random_opening_moves", 2)),
+                exploration_epsilon=float(self_play_cfg.get("exploration_epsilon", 0.08)),
+                bootstrap_games=int(self_play_cfg.get("heuristic_bootstrap_games", 80)),
+                heuristic_mix_ratio=float(self_play_cfg.get("heuristic_mix_ratio", 0.25)),
+                prune_keep_ratio=float(self_play_cfg.get("heuristic_prune_keep_ratio", 0.6)),
+            )
+            future = self._self_play_pool.submit(play_one_game_process, payload, child_conn)
+            tasks.append((future, parent_conn, child_conn))
+
+        results: list[SelfPlayResult] = []
+        pending = tasks
+        while pending:
+            infer_batch: list[tuple[Connection, np.ndarray, list[int]]] = []
+            next_pending: list[tuple[Future[SelfPlayResult], Connection, Connection]] = []
+            for future, conn, child_conn in pending:
+                if future.done():
+                    conn.close()
+                    child_conn.close()
+                    results.append(future.result())
+                    continue
+                if conn.poll():
+                    req = conn.recv()
+                    board = req.get("board")
+                    legal_moves = req.get("legal_moves")
+                    if isinstance(board, np.ndarray) and isinstance(legal_moves, list):
+                        infer_batch.append((conn, board, legal_moves))
+                next_pending.append((future, conn, child_conn))
+
+            if infer_batch:
+                infer_requests = [(board, legal_moves) for _, board, legal_moves in infer_batch]
+                moves = self.trainer.infer_moves_batch(infer_requests)
+                for (conn, _, _), move in zip(infer_batch, moves, strict=False):
+                    conn.send(move)
+
+            pending = next_pending
+            if pending:
+                await asyncio.sleep(0.001)
+
+        self._self_play_games_completed += len(results)
+        runtime_registry.update(active_games=[])
+        return results
 
     def _on_game_progress(
         self,
@@ -146,7 +196,7 @@ class Orchestrator:
             cycle += 1
             runtime_registry.update(status="self_play")
             t0 = time.perf_counter()
-            games = await asyncio.gather(*[asyncio.to_thread(worker.play_one_game) for worker in self.workers])
+            games = await self._run_self_play_cycle()
             batch_ms = (time.perf_counter() - t0) * 1000.0
             total_moves = 0
             total_game_ms = 0.0
@@ -176,7 +226,7 @@ class Orchestrator:
                 avg_game_ms=round(ema_game_ms, 1),
                 avg_game_moves=int(ema_game_moves),
                 games_per_min=round(ema_game_rate, 1),
-                parallel_self_play_games=len(games),
+                parallel_self_play_games=self._parallel_self_play_games,
                 heuristic_policy_moves=int(runtime_registry.snapshot().get("heuristic_policy_moves", 0)) + total_heuristic_moves,
                 model_policy_moves=int(runtime_registry.snapshot().get("model_policy_moves", 0)) + total_model_moves,
             )
