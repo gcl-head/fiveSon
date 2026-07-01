@@ -121,6 +121,39 @@ body {
   opacity: 0.85;
 }
 
+.selfplay-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.selfplay-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.selfplay-title {
+  font-size: 0.8rem;
+  margin-bottom: 8px;
+  opacity: 0.85;
+}
+
+.live-board {
+  display: grid;
+  gap: 1px;
+  background: var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  aspect-ratio: 1;
+}
+
+.live-cell {
+  background: rgba(255, 255, 255, 0.5);
+  position: relative;
+}
+
 button {
   border: none;
   border-radius: 10px;
@@ -139,6 +172,12 @@ button.ghost {
   background: transparent;
   color: var(--text);
   border: 1px solid var(--line);
+}
+
+.parallel-btn.active {
+  background: var(--accent-2);
+  color: #fff;
+  border-color: transparent;
 }
 
 .board {
@@ -218,6 +257,7 @@ button.ghost {
 .delay-2 { animation-delay: 160ms; }
 .delay-3 { animation-delay: 230ms; }
 .delay-4 { animation-delay: 300ms; }
+.delay-5 { animation-delay: 360ms; }
 
 @keyframes rise {
   to {

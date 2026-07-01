@@ -45,6 +45,19 @@ def resume_training() -> dict[str, str]:
     return {"message": "training resumed"}
 
 
+@router.post("/control/parallel/{count}")
+def set_parallel_games(count: int) -> dict[str, object]:
+    allowed = {1, 4, 8, 16, 32}
+    if count not in allowed:
+        raise HTTPException(status_code=400, detail=f"parallel count must be one of {sorted(allowed)}")
+
+    runtime_registry.update(target_parallel_self_play_games=count)
+    return {
+        "message": "parallel self-play target updated",
+        "target_parallel_self_play_games": count,
+    }
+
+
 @router.get("/game/state")
 def game_state() -> dict[str, object]:
     return game_service.state()

@@ -33,6 +33,9 @@ class RuntimeState:
     avg_game_ms: float = 0.0
     steps_per_cycle: int = 0
     batch_size: int = 0
+    parallel_self_play_games: int = 0
+    target_parallel_self_play_games: int = 0
+    active_games: list[dict[str, Any]] = field(default_factory=list)
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 

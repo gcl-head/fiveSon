@@ -7,6 +7,7 @@ const fields = [
   "latest_elo",
   "train_steps_per_sec",
   "games_per_min",
+  "parallel_self_play_games",
   "avg_game_moves",
   "steps_per_cycle",
   "batch_size",
@@ -53,6 +54,79 @@ function updateStatus(data) {
       ? `${(data.avg_game_ms / 1000).toFixed(2)} s`
       : `${data.avg_game_ms.toFixed(0)} ms`;
   }
+
+  updateParallelButtons(Number(data.target_parallel_self_play_games || data.parallel_self_play_games || 0));
+  renderSelfPlayBoards(Array.isArray(data.active_games) ? data.active_games : []);
+}
+
+function formatElapsed(ms) {
+  if (ms >= 60_000) return `${(ms / 60_000).toFixed(2)} min`;
+  if (ms >= 1000) return `${(ms / 1000).toFixed(2)} s`;
+  return `${Math.max(0, ms).toFixed(0)} ms`;
+}
+
+function renderSelfPlayBoards(games) {
+  const grid = document.getElementById("selfPlayGrid");
+  if (!grid) return;
+
+  if (games.length === 0) {
+    grid.innerHTML = "<div class='eval-result'>暂无训练棋局快照</div>";
+    return;
+  }
+
+  grid.innerHTML = "";
+  for (const game of games) {
+    const card = document.createElement("div");
+    card.className = "selfplay-card";
+
+    const title = document.createElement("div");
+    title.className = "selfplay-title";
+    const workerId = Number(game.worker_id ?? 0);
+    const moveCount = Number(game.move_count ?? 0);
+    const winner = Number(game.winner ?? 0);
+    const done = Boolean(game.done);
+    const elapsed = Number(game.elapsed_ms ?? 0);
+    let statusText = done ? "已结束" : "进行中";
+    if (winner === 1) statusText = `${statusText} 黑胜`;
+    if (winner === -1) statusText = `${statusText} 白胜`;
+    title.textContent = `并行局 #${workerId} | 手数 ${moveCount} | 用时 ${formatElapsed(elapsed)} | ${statusText}`;
+    card.appendChild(title);
+
+    const board = document.createElement("div");
+    board.className = "live-board";
+    const matrix = Array.isArray(game.board) ? game.board : [];
+    const size = matrix.length > 0 ? matrix.length : 15;
+    board.style.gridTemplateColumns = `repeat(${size}, 1fr)`;
+
+    for (let r = 0; r < size; r += 1) {
+      for (let c = 0; c < size; c += 1) {
+        const value = Number((matrix[r] || [])[c] ?? 0);
+        const cell = document.createElement("div");
+        cell.className = "live-cell";
+        if (value !== 0) {
+          const stone = document.createElement("span");
+          stone.className = `stone ${value === 1 ? "black" : "white"}`;
+          cell.appendChild(stone);
+        }
+        board.appendChild(cell);
+      }
+    }
+
+    card.appendChild(board);
+    grid.appendChild(card);
+  }
+}
+
+function updateParallelButtons(target) {
+  const buttons = document.querySelectorAll(".parallel-btn");
+  buttons.forEach((btn) => {
+    const value = Number(btn.dataset.parallel || "0");
+    if (value === target) {
+      btn.classList.add("active");
+    } else {
+      btn.classList.remove("active");
+    }
+  });
 }
 
 function updatePolicySource(aiPolicy, generation) {
@@ -203,6 +277,24 @@ async function control(action) {
   await refresh();
 }
 
+async function setParallelGames(count) {
+  const resultNode = document.getElementById("parallelSwitchResult");
+  if (resultNode) resultNode.textContent = `切换到 ${count} 并行中...`;
+
+  try {
+    const res = await fetch(`/api/control/parallel/${count}`, { method: "POST" });
+    if (!res.ok) {
+      const payload = await res.json().catch(() => ({}));
+      throw new Error(payload.detail || "切换失败");
+    }
+    if (resultNode) resultNode.textContent = `已切换目标并行数: ${count}`;
+    await refresh();
+  } catch (err) {
+    console.error(err);
+    if (resultNode) resultNode.textContent = "并行数切换失败";
+  }
+}
+
 async function runQuickEval(games = 30) {
   const resultNode = document.getElementById("quickEvalResult");
   const btn = document.getElementById("quickEvalBtn");
@@ -239,6 +331,12 @@ document.getElementById("refreshBtn").addEventListener("click", refresh);
 document.getElementById("newGameBtn").addEventListener("click", resetGame);
 document.getElementById("newGameBtn").addEventListener("click", hideIngestBanner);
 document.getElementById("quickEvalBtn").addEventListener("click", () => runQuickEval(30));
+document.querySelectorAll(".parallel-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const count = Number(btn.dataset.parallel || "8");
+    setParallelGames(count);
+  });
+});
 
 buildBoard();
 refresh();

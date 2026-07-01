@@ -67,6 +67,8 @@ arena:
 self_play:
   workers: 8
   games_per_cycle: 64
+  random_opening_moves: 2
+  exploration_epsilon: 0.08
   resign_threshold: -0.92
   enable_symmetry_augmentation: true
 

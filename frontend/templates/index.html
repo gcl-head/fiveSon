@@ -35,6 +35,7 @@
         <div class="grid two">
           <div class="card"><label>训练速率（步/秒）</label><strong id="train_steps_per_sec">0.0</strong></div>
           <div class="card"><label>自弈速率（局/分钟）</label><strong id="games_per_min">0.0</strong></div>
+          <div class="card"><label>并行训练棋局数</label><strong id="parallel_self_play_games">0</strong></div>
           <div class="card"><label>平均每局步数</label><strong id="avg_game_moves">0</strong></div>
           <div class="card"><label>平均每局耗时</label><strong id="avg_game_ms">0 ms</strong></div>
           <div class="card"><label>每轮训练步数</label><strong id="steps_per_cycle">0</strong></div>
@@ -43,6 +44,12 @@
       </section>
 
       <section class="panel reveal delay-3">
+        <h2>训练棋局直播</h2>
+        <p class="hero-note">以下棋盘为当前并行训练中的实时快照（每秒更新）。</p>
+        <div id="selfPlayGrid" class="selfplay-grid"></div>
+      </section>
+
+      <section class="panel reveal delay-4">
         <h2>训练控制</h2>
         <div class="actions">
           <button id="pauseBtn">暂停训练</button>
@@ -50,12 +57,21 @@
           <button id="refreshBtn" class="ghost">刷新状态</button>
         </div>
         <div class="actions" style="margin-top: 10px;">
+          <span class="eval-result">并行自弈热切换:</span>
+          <button class="ghost parallel-btn" data-parallel="1">1</button>
+          <button class="ghost parallel-btn" data-parallel="4">4</button>
+          <button class="ghost parallel-btn" data-parallel="8">8</button>
+          <button class="ghost parallel-btn" data-parallel="16">16</button>
+          <button class="ghost parallel-btn" data-parallel="32">32</button>
+          <span id="parallelSwitchResult" class="eval-result"></span>
+        </div>
+        <div class="actions" style="margin-top: 10px;">
           <button id="quickEvalBtn" class="ghost">快速验证（30局）</button>
           <span id="quickEvalResult" class="eval-result">点击后将评测“当前代 vs 0代基线”</span>
         </div>
       </section>
 
-      <section class="panel reveal delay-4">
+      <section class="panel reveal delay-5">
         <h2>人机对战</h2>
         <p id="gameMessage" class="game-message">你执黑棋，点击棋盘落子。</p>
         <div id="gameIngest" class="ingest-banner" style="display:none"></div>
