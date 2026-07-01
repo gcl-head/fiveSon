@@ -47,7 +47,7 @@ def resume_training() -> dict[str, str]:
 
 @router.post("/control/parallel/{count}")
 def set_parallel_games(count: int) -> dict[str, object]:
-    allowed = {1, 4, 8, 16, 32}
+    allowed = {1, 4, 8, 16, 32, 64}
     if count not in allowed:
         raise HTTPException(status_code=400, detail=f"parallel count must be one of {sorted(allowed)}")
 

@@ -24,7 +24,7 @@ const STATUS_LABELS = {
   idle: "训练中",
   paused: "已暂停",
   self_play: "自我对弈",
-  training: "梯度更新",
+  training: "训练中",
   arena: "擂台评估",
   unknown: "未知",
 };
@@ -33,6 +33,16 @@ function updateStatus(data) {
   const rawStatus = data.status || "unknown";
   document.getElementById("status-pill").textContent = STATUS_LABELS[rawStatus] || rawStatus;
   document.getElementById("device-pill").textContent = `运算设备: ${data.device || "检测中"}`;
+  const policyNode = document.getElementById("policySource");
+  if (policyNode) {
+    const currentModel = `${data.current_model || "bootstrap"}`;
+    const bestModel = `${data.best_model || "bootstrap"}`;
+    if (currentModel !== "bootstrap") {
+      policyNode.textContent = `对战策略: 已恢复 ${currentModel}，最佳模型 ${bestModel}`;
+    } else {
+      policyNode.textContent = "对战策略: 等待恢复训练模型";
+    }
+  }
 
   for (const key of fields) {
     const node = document.getElementById(key);

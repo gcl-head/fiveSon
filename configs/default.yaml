@@ -65,6 +65,7 @@ arena:
   max_parallel_games: 8
 
 self_play:
+  parallel_games: 32
   workers: 8
   games_per_cycle: 64
   random_opening_moves: 2

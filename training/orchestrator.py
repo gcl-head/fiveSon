@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from concurrent.futures import Future, ProcessPoolExecutor
-from multiprocessing import get_context
+from multiprocessing import Process, get_context
 from multiprocessing.connection import Connection
 from pathlib import Path
 from threading import Lock
@@ -30,6 +29,9 @@ class Orchestrator:
         self.app_cfg = load_app_config(config_path)
         self.raw_cfg = load_yaml(config_path)
         self.device_cfg = choose_device_config(config_path)
+        self._project_root = self.config_path.parents[1]
+        paths_cfg = self.raw_cfg.get("paths", {})
+        self._checkpoint_dir = self._project_root / str(paths_cfg.get("checkpoints_dir", "checkpoints"))
 
         replay_cfg = self.raw_cfg["replay_buffer"]
         self.replay = PrioritizedReplayBuffer(
@@ -47,13 +49,14 @@ class Orchestrator:
         self._active_games: dict[int, dict[str, object]] = {}
         self._active_games_lock = Lock()
         self._self_play_games_completed = 0
-        self._self_play_pool: ProcessPoolExecutor | None = None
         self.trainer = Trainer(
             self.replay,
+            board_size=self.app_cfg.board_size,
             batch_size=self.device_cfg.batch_size,
             device=self.device_cfg.device,
             amp_enabled=self.device_cfg.amp_enabled,
             learning_rate=float(self.raw_cfg["training"].get("learning_rate", 0.001)),
+            checkpoint_dir=self._checkpoint_dir,
         )
         # Wire model inference to both bridge (for gameplay) and worker (for self-play data generation)
         training_bridge.register_model_move_fn(self.trainer.infer_move)
@@ -67,6 +70,22 @@ class Orchestrator:
 
         runtime_registry.update(status="boot", device=self.device_cfg.device)
         self._steps_per_cycle = int(self.raw_cfg["training"].get("steps_per_cycle", 16))
+        self._checkpoint_interval_steps = max(1, int(self.raw_cfg["training"].get("checkpoint_interval_steps", 5000)))
+        restored = self.trainer.load_checkpoint(
+            self._checkpoint_dir,
+            board_size=self.app_cfg.board_size,
+            action_dim=self.app_cfg.board_size * self.app_cfg.board_size,
+        )
+        if restored is not None:
+            training_bridge.restore_generation(int(restored.get("generation", 0)))
+            restored_current_model = str(restored.get("current_model", "bootstrap"))
+            if restored_current_model == "bootstrap" and int(restored.get("training_step", 0)) > 0:
+                restored_current_model = f"checkpoint-g{int(restored.get('generation', 0))}-s{int(restored.get('training_step', 0))}"
+            runtime_registry.update(
+                training_step=int(restored.get("training_step", 0)),
+                current_model=restored_current_model,
+                best_model=str(restored.get("best_model", "bootstrap")),
+            )
         runtime_registry.update(
             steps_per_cycle=self._steps_per_cycle,
             batch_size=self.device_cfg.batch_size,
@@ -76,11 +95,8 @@ class Orchestrator:
         )
 
     def _set_parallel_self_play_games(self, count: int) -> None:
-        count = max(1, min(32, int(count)))
+        count = max(1, min(64, int(count)))
         self._parallel_self_play_games = count
-        if self._self_play_pool is not None:
-            self._self_play_pool.shutdown(wait=False, cancel_futures=True)
-        self._self_play_pool = ProcessPoolExecutor(max_workers=count, mp_context=get_context("spawn"))
         with self._active_games_lock:
             self._active_games = {}
         runtime_registry.update(
@@ -88,59 +104,134 @@ class Orchestrator:
             active_games=[],
         )
 
-    async def _run_self_play_cycle(self) -> list[SelfPlayResult]:
-        if self._self_play_pool is None:
-            self._set_parallel_self_play_games(self._parallel_self_play_games)
-        assert self._self_play_pool is not None
+    def _spawn_self_play_process(
+        self,
+        ctx: object,
+        worker_id: int,
+        played_games: int,
+        self_play_cfg: dict[str, object],
+    ) -> tuple[Process, Connection]:
+        spawn_ctx = ctx
+        assert hasattr(spawn_ctx, "Pipe") and hasattr(spawn_ctx, "Process")
+        parent_conn, child_conn = spawn_ctx.Pipe(duplex=True)
+        payload = ProcessSelfPlayTask(
+            worker_id=worker_id,
+            played_games=played_games,
+            board_size=self.app_cfg.board_size,
+            win_length=self.app_cfg.win_length,
+            temperature=float(self.raw_cfg.get("mcts", {}).get("temperature", 1.0)),
+            random_opening_moves=int(self_play_cfg.get("random_opening_moves", 2)),
+            exploration_epsilon=float(self_play_cfg.get("exploration_epsilon", 0.08)),
+            bootstrap_games=int(self_play_cfg.get("heuristic_bootstrap_games", 80)),
+            heuristic_mix_ratio=float(self_play_cfg.get("heuristic_mix_ratio", 0.25)),
+            prune_keep_ratio=float(self_play_cfg.get("heuristic_prune_keep_ratio", 0.6)),
+        )
+        process = spawn_ctx.Process(target=play_one_game_process, args=(payload, child_conn))
+        process.start()
+        child_conn.close()
+        return process, parent_conn
 
+    def _clear_active_game(self, worker_id: int) -> None:
+        with self._active_games_lock:
+            if worker_id in self._active_games:
+                del self._active_games[worker_id]
+            active = [self._active_games[i] for i in sorted(self._active_games.keys())]
+        runtime_registry.update(active_games=active)
+
+    async def _run_self_play_cycle(self) -> list[SelfPlayResult]:
         self_play_cfg = self.raw_cfg.get("self_play", {})
         total_games = max(
             self._parallel_self_play_games,
             int(self_play_cfg.get("games_per_cycle", self._parallel_self_play_games)),
         )
-        tasks: list[tuple[Future[SelfPlayResult], Connection, Connection]] = []
-        for game_index in range(total_games):
-            worker_id = game_index % self._parallel_self_play_games
-            parent_conn, child_conn = get_context("spawn").Pipe(duplex=True)
-            payload = ProcessSelfPlayTask(
+        ctx = get_context("spawn")
+
+        tasks: list[tuple[Process, Connection, int]] = []
+        available_worker_ids = list(range(self._parallel_self_play_games))
+        next_game_index = 0
+
+        while next_game_index < total_games and available_worker_ids:
+            worker_id = available_worker_ids.pop(0)
+            process, conn = self._spawn_self_play_process(
+                ctx=ctx,
                 worker_id=worker_id,
-                played_games=self._self_play_games_completed + game_index,
-                board_size=self.app_cfg.board_size,
-                win_length=self.app_cfg.win_length,
-                temperature=float(self.raw_cfg.get("mcts", {}).get("temperature", 1.0)),
-                random_opening_moves=int(self_play_cfg.get("random_opening_moves", 2)),
-                exploration_epsilon=float(self_play_cfg.get("exploration_epsilon", 0.08)),
-                bootstrap_games=int(self_play_cfg.get("heuristic_bootstrap_games", 80)),
-                heuristic_mix_ratio=float(self_play_cfg.get("heuristic_mix_ratio", 0.25)),
-                prune_keep_ratio=float(self_play_cfg.get("heuristic_prune_keep_ratio", 0.6)),
+                played_games=self._self_play_games_completed + next_game_index,
+                self_play_cfg=self_play_cfg,
             )
-            future = self._self_play_pool.submit(play_one_game_process, payload, child_conn)
-            tasks.append((future, parent_conn, child_conn))
+            tasks.append((process, conn, worker_id))
+            next_game_index += 1
 
         results: list[SelfPlayResult] = []
         pending = tasks
         while pending:
             infer_batch: list[tuple[Connection, np.ndarray, list[int]]] = []
-            next_pending: list[tuple[Future[SelfPlayResult], Connection, Connection]] = []
-            for future, conn, child_conn in pending:
-                if future.done():
-                    conn.close()
-                    child_conn.close()
-                    results.append(future.result())
-                    continue
-                if conn.poll():
-                    req = conn.recv()
+            next_pending: list[tuple[Process, Connection, int]] = []
+            released_worker_ids: list[int] = []
+            for process, conn, worker_id in pending:
+                finished = False
+                while conn.poll():
+                    try:
+                        req = conn.recv()
+                    except (EOFError, OSError):
+                        break
+                    if not isinstance(req, dict):
+                        continue
+                    kind = str(req.get("kind", "request"))
+                    if kind == "progress":
+                        self._on_game_progress(
+                            int(req.get("worker_id", 0)),
+                            req.get("board"),
+                            int(req.get("move_count", 0)),
+                            int(req.get("winner", 0)),
+                            bool(req.get("done", False)),
+                            float(req.get("elapsed_ms", 0.0)),
+                        )
+                        continue
+                    if kind == "result":
+                        results.append(req["result"])
+                        conn.close()
+                        process.join(timeout=0.1)
+                        self._clear_active_game(worker_id)
+                        released_worker_ids.append(worker_id)
+                        finished = True
+                        break
                     board = req.get("board")
                     legal_moves = req.get("legal_moves")
                     if isinstance(board, np.ndarray) and isinstance(legal_moves, list):
                         infer_batch.append((conn, board, legal_moves))
-                next_pending.append((future, conn, child_conn))
+                if finished:
+                    continue
+                if process.exitcode is None:
+                    next_pending.append((process, conn, worker_id))
+                else:
+                    conn.close()
+                    process.join(timeout=0.1)
+                    self._clear_active_game(worker_id)
+                    released_worker_ids.append(worker_id)
 
             if infer_batch:
                 infer_requests = [(board, legal_moves) for _, board, legal_moves in infer_batch]
                 moves = self.trainer.infer_moves_batch(infer_requests)
                 for (conn, _, _), move in zip(infer_batch, moves, strict=False):
-                    conn.send(move)
+                    try:
+                        conn.send(move)
+                    except (BrokenPipeError, EOFError, OSError):
+                        continue
+
+            if released_worker_ids:
+                available_worker_ids.extend(released_worker_ids)
+                available_worker_ids.sort()
+
+            while next_game_index < total_games and available_worker_ids:
+                worker_id = available_worker_ids.pop(0)
+                process, conn = self._spawn_self_play_process(
+                    ctx=ctx,
+                    worker_id=worker_id,
+                    played_games=self._self_play_games_completed + next_game_index,
+                    self_play_cfg=self_play_cfg,
+                )
+                next_pending.append((process, conn, worker_id))
+                next_game_index += 1
 
             pending = next_pending
             if pending:
@@ -259,6 +350,19 @@ class Orchestrator:
                     arena_games=runtime_registry.snapshot()["arena_games"] + result.games,
                     latest_elo=best_elo,
                     best_model="candidate" if result.promoted else "bootstrap",
+                )
+
+            runtime_snapshot = runtime_registry.snapshot()
+            if metrics.step % self._checkpoint_interval_steps == 0 or switched_model is not None or cycle == 1:
+                checkpoint_model = str(runtime_snapshot.get("current_model", "bootstrap"))
+                if checkpoint_model == "bootstrap":
+                    checkpoint_model = f"checkpoint-g{training_bridge.deployed_generation()}-s{metrics.step}"
+                    runtime_registry.update(current_model=checkpoint_model)
+                self.trainer.save_checkpoint(
+                    self._checkpoint_dir,
+                    generation=training_bridge.deployed_generation(),
+                    current_model=checkpoint_model,
+                    best_model=str(runtime_snapshot.get("best_model", "bootstrap")),
                 )
 
             runtime_registry.update(status="idle")

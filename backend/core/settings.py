@@ -20,6 +20,7 @@ class DeviceConfig:
     batch_size: int
     num_workers: int
     prefetch_factor: int
+    persistent_workers: bool
     pin_memory: bool
 
 
@@ -93,6 +94,7 @@ def choose_device_config(path: Path) -> DeviceConfig:
 
     cpu_workers = int(train.get("max_num_workers", 4))
     prefetch = int(train.get("prefetch_factor", 2))
+    persistent_workers = bool(train.get("persistent_workers", False))
 
     return DeviceConfig(
         device=device,
@@ -102,5 +104,6 @@ def choose_device_config(path: Path) -> DeviceConfig:
         batch_size=int(train.get("batch_size", 256)),
         num_workers=max(1, cpu_workers),
         prefetch_factor=max(1, prefetch),
+        persistent_workers=persistent_workers,
         pin_memory=pin_memory,
     )

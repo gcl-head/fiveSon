@@ -69,6 +69,11 @@ class TrainingBridge:
             self._generation = generation
             return f"checkpoint-g{generation}-s{training_step}"
 
+    def restore_generation(self, generation: int) -> None:
+        """Restore deployed generation after process restart."""
+        with self._lock:
+            self._generation = max(0, int(generation))
+
     def deployed_generation(self) -> int:
         """Get currently deployed gameplay generation."""
         with self._lock:
