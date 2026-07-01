@@ -69,6 +69,9 @@ self_play:
   games_per_cycle: 64
   random_opening_moves: 2
   exploration_epsilon: 0.08
+  heuristic_bootstrap_games: 80
+  heuristic_mix_ratio: 0.25
+  heuristic_prune_keep_ratio: 0.6
   resign_threshold: -0.92
   enable_symmetry_augmentation: true
 

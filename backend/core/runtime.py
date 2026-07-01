@@ -36,6 +36,9 @@ class RuntimeState:
     parallel_self_play_games: int = 0
     target_parallel_self_play_games: int = 0
     active_games: list[dict[str, Any]] = field(default_factory=list)
+    heuristic_policy_moves: int = 0
+    model_policy_moves: int = 0
+    heuristic_bootstrap_games: int = 0
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 

@@ -8,6 +8,9 @@ const fields = [
   "train_steps_per_sec",
   "games_per_min",
   "parallel_self_play_games",
+  "heuristic_policy_moves",
+  "model_policy_moves",
+  "heuristic_bootstrap_games",
   "avg_game_moves",
   "steps_per_cycle",
   "batch_size",
@@ -53,6 +56,21 @@ function updateStatus(data) {
     msNode.textContent = data.avg_game_ms >= 1000
       ? `${(data.avg_game_ms / 1000).toFixed(2)} s`
       : `${data.avg_game_ms.toFixed(0)} ms`;
+  }
+
+  const modelMoves = Number(data.model_policy_moves || 0);
+  const heuristicMoves = Number(data.heuristic_policy_moves || 0);
+  const totalPolicyMoves = modelMoves + heuristicMoves;
+  const modelRatio = totalPolicyMoves > 0 ? (modelMoves * 100) / totalPolicyMoves : 0;
+  const heuristicRatio = totalPolicyMoves > 0 ? (heuristicMoves * 100) / totalPolicyMoves : 0;
+
+  const modelRatioNode = document.getElementById("model_policy_ratio");
+  if (modelRatioNode) {
+    modelRatioNode.textContent = `${modelRatio.toFixed(1)}%`;
+  }
+  const heuristicRatioNode = document.getElementById("heuristic_policy_ratio");
+  if (heuristicRatioNode) {
+    heuristicRatioNode.textContent = `${heuristicRatio.toFixed(1)}%`;
   }
 
   updateParallelButtons(Number(data.target_parallel_self_play_games || data.parallel_self_play_games || 0));
@@ -137,7 +155,7 @@ function updatePolicySource(aiPolicy, generation) {
     policyNode.textContent = `对战策略: 训练模型推理（已部署代次 g${generation ?? 0}）`;
     return;
   }
-  policyNode.textContent = `对战策略: 启发式回退（代次 g${generation ?? 0}，模型暂不可用）`;
+  policyNode.textContent = `对战策略: 启发式策略（代次 g${generation ?? 0}，模型暂不可用）`;
 }
 
 async function refresh() {

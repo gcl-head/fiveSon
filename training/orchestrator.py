@@ -54,6 +54,8 @@ class Orchestrator:
         self.arena = Arena(
             games=self.app_cfg.arena_games,
             promotion_win_rate=self.app_cfg.promotion_win_rate,
+            board_size=self.app_cfg.board_size,
+            win_length=self.app_cfg.win_length,
         )
 
         runtime_registry.update(status="boot", device=self.device_cfg.device)
@@ -63,6 +65,7 @@ class Orchestrator:
             batch_size=self.device_cfg.batch_size,
             parallel_self_play_games=self._parallel_self_play_games,
             target_parallel_self_play_games=self._parallel_self_play_games,
+            heuristic_bootstrap_games=int(self.raw_cfg.get("self_play", {}).get("heuristic_bootstrap_games", 80)),
         )
 
     def _set_parallel_self_play_games(self, count: int) -> None:
@@ -71,6 +74,9 @@ class Orchestrator:
         self_play_cfg = self.raw_cfg.get("self_play", {})
         opening_noise_moves = int(self_play_cfg.get("random_opening_moves", 2))
         exploration_epsilon = float(self_play_cfg.get("exploration_epsilon", 0.08))
+        heuristic_bootstrap_games = int(self_play_cfg.get("heuristic_bootstrap_games", 80))
+        heuristic_mix_ratio = float(self_play_cfg.get("heuristic_mix_ratio", 0.25))
+        prune_keep_ratio = float(self_play_cfg.get("heuristic_prune_keep_ratio", 0.6))
         self.workers = [
             SelfPlayWorker(
                 board_size=self.app_cfg.board_size,
@@ -81,6 +87,9 @@ class Orchestrator:
                 progress_cb=self._on_game_progress,
                 random_opening_moves=opening_noise_moves,
                 exploration_epsilon=exploration_epsilon,
+                bootstrap_games=heuristic_bootstrap_games,
+                heuristic_mix_ratio=heuristic_mix_ratio,
+                prune_keep_ratio=prune_keep_ratio,
             )
             for i in range(count)
         ]
@@ -142,10 +151,14 @@ class Orchestrator:
             total_moves = 0
             total_game_ms = 0.0
             total_samples = 0
+            total_heuristic_moves = 0
+            total_model_moves = 0
             for game in games:
                 total_moves += game.moves
                 total_game_ms += game.elapsed_ms
                 total_samples += len(game.samples)
+                total_heuristic_moves += game.heuristic_moves
+                total_model_moves += game.model_moves
                 for sample in game.samples:
                     self.replay.push(sample)
 
@@ -164,6 +177,8 @@ class Orchestrator:
                 avg_game_moves=int(ema_game_moves),
                 games_per_min=round(ema_game_rate, 1),
                 parallel_self_play_games=len(games),
+                heuristic_policy_moves=int(runtime_registry.snapshot().get("heuristic_policy_moves", 0)) + total_heuristic_moves,
+                model_policy_moves=int(runtime_registry.snapshot().get("model_policy_moves", 0)) + total_model_moves,
             )
 
             runtime_registry.update(status="training")
@@ -188,9 +203,7 @@ class Orchestrator:
 
             if cycle % 20 == 0:
                 runtime_registry.update(status="arena")
-                challenger_wins = cycle % self.app_cfg.arena_games
-                draws = int(0.1 * self.app_cfg.arena_games)
-                result = self.arena.evaluate(challenger_wins, draws, best_elo)
+                result = self.arena.evaluate(self.trainer.infer_move, best_elo)
                 best_elo = result.best_elo if not result.promoted else result.challenger_elo
                 runtime_registry.update(
                     arena_games=runtime_registry.snapshot()["arena_games"] + result.games,

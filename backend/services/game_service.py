@@ -10,6 +10,7 @@ import numpy as np
 from backend.core.runtime import runtime_registry
 from backend.services.training_bridge import training_bridge
 from engine.board import Board, BoardState
+from self_play.policy_heuristic import GomokuHeuristicPolicy
 
 
 @dataclass(slots=True)
@@ -44,6 +45,7 @@ class GameService:
 
     def __init__(self, size: int = 15, win_length: int = 5) -> None:
         self._board = Board(size=size, win_length=win_length)
+        self._heuristic = GomokuHeuristicPolicy(size=size)
         self._state: BoardState = self._board.initial_state()
         self._trajectory: list[tuple[np.ndarray, int, int]] = []
 
@@ -59,7 +61,7 @@ class GameService:
             "move_count": self._state.move_count,
             "legal_moves": len(legal),
             "deployed_generation": generation,
-            "ai_policy": "trained_model" if model_move is not None else "heuristic_generation",
+            "ai_policy": "trained_model" if model_move is not None else "heuristic_policy",
         }
 
     def reset(self) -> dict[str, object]:
@@ -120,26 +122,19 @@ class GameService:
             if model_move is not None:
                 return model_move
 
-        center = self._board.size // 2
-        center_move = center * self._board.size + center
-        if center_move in legal:
-            return center_move
-
-        # Favor candidate moves close to occupied stones for a stronger baseline.
-        occupied = np.argwhere(state.board != 0)
-        if occupied.size == 0:
-            return int(np.random.choice(legal))
-
-        scores: list[tuple[float, int]] = []
+        heuristic_policy = self._heuristic.get_policy(state.board.tolist(), state.to_play)
+        best_move = None
+        best_prob = -1.0
         for move in legal:
-            r, c = divmod(move, self._board.size)
-            min_dist = float(np.min(np.abs(occupied[:, 0] - r) + np.abs(occupied[:, 1] - c)))
-            scores.append((min_dist, move))
+            x, y = divmod(move, self._board.size)
+            prob = float(heuristic_policy.get((x, y), 0.0))
+            if prob > best_prob:
+                best_prob = prob
+                best_move = move
 
-        scores.sort(key=lambda item: item[0])
-        top_k_size = max(1, min(8, 8 - min(generation, 6)))
-        top_k = [m for _, m in scores[: min(top_k_size, len(scores))]]
-        return int(np.random.choice(top_k))
+        if best_move is not None:
+            return int(best_move)
+        return int(np.random.choice(legal))
 
     def _pick_ai_move(self, state: BoardState) -> int:
         generation = training_bridge.deployed_generation()
