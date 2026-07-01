@@ -1,0 +1,96 @@
+app:
+  project_name: fiveSon
+  board_size: 15
+  win_length: 5
+  host: 0.0.0.0
+  port: 8000
+  database_url: sqlite+aiosqlite:///database/fiveson.sqlite
+
+training:
+  # ---------------- Device ----------------
+  device: auto
+  amp: true
+  torch_compile: true
+
+  # MPS下一般建议关闭
+  gradient_checkpointing: false
+
+  # ---------------- Batch ----------------
+  batch_size: 1024
+  gradient_accumulation_steps: 1
+
+  # ---------------- DataLoader ----------------
+  max_num_workers: 10
+  prefetch_factor: 8
+  persistent_workers: true
+
+  # ---------------- Optimizer ----------------
+  learning_rate: 0.002
+  weight_decay: 0.0001
+  optimizer: adamw
+
+  scheduler: cosine
+  warmup_steps: 5000
+
+  # ---------------- Logging ----------------
+  checkpoint_interval_steps: 5000
+  eval_interval_steps: 5000
+  log_interval_steps: 50
+
+  ema_decay: 0.9995
+
+  max_steps: 0
+
+mcts:
+  simulations: 400
+  c_puct: 1.8
+  dirichlet_alpha: 0.3
+  dirichlet_epsilon: 0.25
+  temperature: 1.0
+  virtual_loss: 1.0
+  tree_reuse: true
+  transposition_table_size: 2000000
+
+replay_buffer:
+  capacity: 1000000
+  prioritized: true
+  alpha: 0.6
+  beta_start: 0.4
+  beta_anneal_steps: 500000
+  compress: true
+
+arena:
+  games: 400
+  promotion_win_rate: 0.55
+  max_parallel_games: 8
+
+self_play:
+  workers: 8
+  games_per_cycle: 64
+  resign_threshold: -0.92
+  enable_symmetry_augmentation: true
+
+webplay:
+  model_switch_interval_steps: 200
+  human_game_priority_weight: 10.0
+
+curriculum:
+  enabled: true
+  stages:
+    - name: board9_openings
+      board_size: 9
+      min_steps: 0
+    - name: board11_midgame
+      board_size: 11
+      min_steps: 10000
+    - name: board15_full
+      board_size: 15
+      min_steps: 40000
+
+paths:
+  checkpoints_dir: checkpoints
+  weights_dir: weights
+  logs_dir: logs
+  parquet_dir: database/parquet
+  opening_book_path: opening/opening_book.parquet
+  endgame_db_path: endgame/endgame_cache.parquet

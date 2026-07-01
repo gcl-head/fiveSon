@@ -1,0 +1,233 @@
+:root {
+  --bg: radial-gradient(circle at 10% 20%, #f7f0d8, #dbc49d 45%, #9b7f56 100%);
+  --panel: rgba(255, 247, 230, 0.82);
+  --text: #34210f;
+  --accent: #ca4e1c;
+  --accent-2: #17624f;
+  --line: rgba(52, 33, 15, 0.16);
+  --shadow: 0 16px 40px rgba(58, 35, 15, 0.15);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: radial-gradient(circle at 10% 20%, #2f2517, #20170f 45%, #100b07 100%);
+    --panel: rgba(48, 36, 22, 0.8);
+    --text: #f6e3c6;
+    --accent: #ff8f5e;
+    --accent-2: #4cd6b2;
+    --line: rgba(246, 227, 198, 0.2);
+    --shadow: 0 16px 40px rgba(0, 0, 0, 0.32);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Avenir Next", "PingFang SC", "Hiragino Sans GB", sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  min-height: 100vh;
+}
+
+.layout {
+  width: min(1100px, 92vw);
+  margin: 32px auto;
+  display: grid;
+  gap: 16px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  padding: 18px;
+  backdrop-filter: blur(6px);
+}
+
+.hero h1 {
+  margin: 0;
+  font-size: clamp(2rem, 4vw, 3rem);
+}
+
+.hero p {
+  margin-top: 8px;
+  opacity: 0.8;
+}
+
+.hero-note {
+  margin-top: 6px;
+  margin-bottom: 0;
+  font-size: 0.92rem;
+  opacity: 0.9;
+}
+
+.status-row {
+  margin-top: 14px;
+  display: flex;
+  gap: 10px;
+}
+
+.pill {
+  background: var(--accent);
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 0.9rem;
+  letter-spacing: 0.02em;
+}
+
+.pill.alt {
+  background: var(--accent-2);
+}
+
+.grid.two {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.card label {
+  display: block;
+  font-size: 0.78rem;
+  opacity: 0.75;
+}
+
+.card strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 1.1rem;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.eval-result {
+  align-self: center;
+  font-size: 0.92rem;
+  opacity: 0.85;
+}
+
+button {
+  border: none;
+  border-radius: 10px;
+  padding: 10px 14px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+
+.board {
+  width: min(100%, 620px);
+  aspect-ratio: 1;
+  display: grid;
+  grid-template-columns: repeat(15, 1fr);
+  gap: 1px;
+  background: var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.cell {
+  background: rgba(255, 255, 255, 0.5);
+  position: relative;
+  cursor: pointer;
+}
+
+.cell:hover {
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.stone {
+  position: absolute;
+  inset: 10%;
+  border-radius: 50%;
+  box-shadow: 0 5px 10px rgba(0, 0, 0, 0.3);
+  animation: pop-in 180ms ease-out;
+}
+
+.stone.black {
+  background: radial-gradient(circle at 30% 30%, #535353, #151515 70%);
+}
+
+.stone.white {
+  background: radial-gradient(circle at 30% 30%, #ffffff, #dad7cf 70%);
+  border: 1px solid rgba(50, 50, 50, 0.2);
+}
+
+.game-message {
+  margin-top: 0;
+  margin-bottom: 12px;
+  font-weight: 600;
+}
+
+.ingest-banner {
+  margin-bottom: 12px;
+  padding: 10px 16px;
+  border-radius: 10px;
+  background: rgba(71, 180, 130, 0.18);
+  border: 1px solid rgba(71, 180, 130, 0.45);
+  color: var(--accent-2);
+  font-weight: 600;
+  font-size: 0.95rem;
+  animation: rise 400ms forwards;
+}
+
+@keyframes pop-in {
+  from {
+    transform: scale(0.6);
+    opacity: 0.5;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.reveal {
+  opacity: 0;
+  transform: translateY(10px);
+  animation: rise 500ms forwards;
+}
+
+.delay-1 { animation-delay: 90ms; }
+.delay-2 { animation-delay: 160ms; }
+.delay-3 { animation-delay: 230ms; }
+.delay-4 { animation-delay: 300ms; }
+
+@keyframes rise {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 760px) {
+  .grid.two {
+    grid-template-columns: 1fr;
+  }
+}

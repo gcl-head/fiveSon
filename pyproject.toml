@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fiveson"
+version = "0.1.0"
+description = "Long-running Gomoku AI platform inspired by KataGo + AlphaZero"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "fiveSon" }]
+dependencies = [
+  "fastapi>=0.111.0",
+  "uvicorn[standard]>=0.30.0",
+  "pydantic>=2.8.0",
+  "pyyaml>=6.0.1",
+  "numpy>=1.26.0",
+  "sqlalchemy>=2.0.31",
+  "aiosqlite>=0.20.0",
+  "pandas>=2.2.2",
+  "pyarrow>=16.1.0",
+  "tensorboard>=2.17.0",
+  "optuna>=3.6.1",
+  "rich>=13.7.1",
+  "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+train = [
+  "torch>=2.4.0; python_version < '3.13'",
+  "torchvision>=0.19.0; python_version < '3.13'",
+]
+dev = [
+  "pytest>=8.3.2",
+  "pytest-cov>=5.0.0",
+  "mypy>=1.11.1",
+  "ruff>=0.5.5",
+  "httpx2>=0.22.0",
+  "types-PyYAML>=6.0.12.20240311",
+]
+
+[tool.setuptools]
+packages = [
+  "backend",
+  "backend.api",
+  "backend.core",
+  "backend.services",
+  "engine",
+  "network",
+  "mcts",
+  "training",
+  "arena",
+  "evaluation",
+  "replay_buffer",
+  "self_play",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["frontend"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.14"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+exclude = ["frontend"]
+
+[[tool.mypy.overrides]]
+module = ["torch", "torch.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
