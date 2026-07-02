@@ -18,10 +18,14 @@ const fields = [
 
 let gameSize = 15;
 let gameWinner = 0;
+let statusHoldUntilMs = 0;
+let heldStatus = "";
+
+const TRAINING_STATUS_HOLD_MS = 2000;
 
 const STATUS_LABELS = {
   boot: "启动中",
-  idle: "训练中",
+  idle: "空闲",
   paused: "已暂停",
   self_play: "自我对弈",
   training: "训练中",
@@ -29,9 +33,35 @@ const STATUS_LABELS = {
   unknown: "未知",
 };
 
+function resolveDisplayStatus(rawStatus) {
+  const now = Date.now();
+  if (rawStatus === "training") {
+    heldStatus = "training";
+    statusHoldUntilMs = now + TRAINING_STATUS_HOLD_MS;
+    return "training";
+  }
+
+  if (rawStatus === "paused" || rawStatus === "boot" || rawStatus === "arena") {
+    heldStatus = "";
+    statusHoldUntilMs = 0;
+    return rawStatus;
+  }
+
+  if (heldStatus === "training" && now < statusHoldUntilMs && rawStatus === "idle") {
+    return "training";
+  }
+
+  if (now >= statusHoldUntilMs) {
+    heldStatus = "";
+    statusHoldUntilMs = 0;
+  }
+  return rawStatus;
+}
+
 function updateStatus(data) {
   const rawStatus = data.status || "unknown";
-  document.getElementById("status-pill").textContent = STATUS_LABELS[rawStatus] || rawStatus;
+  const displayStatus = resolveDisplayStatus(rawStatus);
+  document.getElementById("status-pill").textContent = STATUS_LABELS[displayStatus] || displayStatus;
   document.getElementById("device-pill").textContent = `运算设备: ${data.device || "检测中"}`;
   const policyNode = document.getElementById("policySource");
   if (policyNode) {
@@ -301,6 +331,9 @@ async function resetGame() {
 }
 
 async function control(action) {
+  // User-triggered control should immediately drop any stale training hold state.
+  heldStatus = "";
+  statusHoldUntilMs = 0;
   await fetch(`/api/control/${action}`, { method: "POST" });
   await refresh();
 }

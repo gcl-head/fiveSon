@@ -17,6 +17,6 @@ async def ws_status(websocket: WebSocket) -> None:
     try:
         while True:
             await websocket.send_json(runtime_registry.snapshot())
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.2)
     except WebSocketDisconnect:
         return

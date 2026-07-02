@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from multiprocessing import Process, get_context
+from multiprocessing.context import BaseContext
 from multiprocessing.connection import Connection
 from pathlib import Path
 from threading import Lock
@@ -18,7 +20,7 @@ from backend.services.training_bridge import training_bridge
 from replay_buffer.prioritized import PrioritizedReplayBuffer
 from self_play.process_worker import ProcessSelfPlayTask, play_one_game_process
 from self_play.worker import SelfPlayResult
-from training.trainer import Trainer
+from training.trainer import TrainMetrics, Trainer
 
 
 class Orchestrator:
@@ -106,14 +108,12 @@ class Orchestrator:
 
     def _spawn_self_play_process(
         self,
-        ctx: object,
+        ctx: BaseContext,
         worker_id: int,
         played_games: int,
         self_play_cfg: dict[str, object],
     ) -> tuple[Process, Connection]:
-        spawn_ctx = ctx
-        assert hasattr(spawn_ctx, "Pipe") and hasattr(spawn_ctx, "Process")
-        parent_conn, child_conn = spawn_ctx.Pipe(duplex=True)
+        parent_conn, child_conn = ctx.Pipe(duplex=True)
         payload = ProcessSelfPlayTask(
             worker_id=worker_id,
             played_games=played_games,
@@ -126,7 +126,7 @@ class Orchestrator:
             heuristic_mix_ratio=float(self_play_cfg.get("heuristic_mix_ratio", 0.25)),
             prune_keep_ratio=float(self_play_cfg.get("heuristic_prune_keep_ratio", 0.6)),
         )
-        process = spawn_ctx.Process(target=play_one_game_process, args=(payload, child_conn))
+        process = ctx.Process(target=play_one_game_process, args=(payload, child_conn))
         process.start()
         child_conn.close()
         return process, parent_conn
@@ -150,6 +150,11 @@ class Orchestrator:
         available_worker_ids = list(range(self._parallel_self_play_games))
         next_game_index = 0
 
+        # If pause is requested before this cycle starts, skip spawning workers.
+        if bool(runtime_registry.snapshot().get("paused", False)):
+            runtime_registry.update(active_games=[])
+            return []
+
         while next_game_index < total_games and available_worker_ids:
             worker_id = available_worker_ids.pop(0)
             process, conn = self._spawn_self_play_process(
@@ -164,6 +169,17 @@ class Orchestrator:
         results: list[SelfPlayResult] = []
         pending = tasks
         while pending:
+            if bool(runtime_registry.snapshot().get("paused", False)):
+                for process, conn, worker_id in pending:
+                    with contextlib.suppress(Exception):
+                        conn.close()
+                    if process.is_alive():
+                        process.terminate()
+                    process.join(timeout=0.2)
+                    self._clear_active_game(worker_id)
+                runtime_registry.update(active_games=[])
+                return results
+
             infer_batch: list[tuple[Connection, np.ndarray, list[int]]] = []
             next_pending: list[tuple[Process, Connection, int]] = []
             released_worker_ids: list[int] = []
@@ -223,6 +239,8 @@ class Orchestrator:
                 available_worker_ids.sort()
 
             while next_game_index < total_games and available_worker_ids:
+                if bool(runtime_registry.snapshot().get("paused", False)):
+                    break
                 worker_id = available_worker_ids.pop(0)
                 process, conn = self._spawn_self_play_process(
                     ctx=ctx,
@@ -261,6 +279,15 @@ class Orchestrator:
             }
             active = [self._active_games[i] for i in sorted(self._active_games.keys())]
         runtime_registry.update(active_games=active)
+
+    def _run_training_steps(self, steps: int) -> tuple[TrainMetrics | None, float]:
+        """Execute training work in a worker thread to avoid blocking event loop."""
+        started = time.perf_counter()
+        last_metrics: TrainMetrics | None = None
+        for _ in range(max(1, steps)):
+            last_metrics = self.trainer.train_step()
+        elapsed = time.perf_counter() - started
+        return last_metrics, elapsed
 
     async def run_forever(self) -> None:
         """Run forever-training cycles until interrupted."""
@@ -322,13 +349,18 @@ class Orchestrator:
                 model_policy_moves=int(runtime_registry.snapshot().get("model_policy_moves", 0)) + total_model_moves,
             )
 
+            # Pause may be requested during self-play. Do not enter training stage in that case.
+            if bool(runtime_registry.snapshot().get("paused", False)):
+                runtime_registry.update(status="paused", active_games=[])
+                await asyncio.sleep(0.05)
+                continue
+
+            train_status_started = time.perf_counter()
+            # Training stage has no live self-play boards; clear stale snapshots before switching status.
+            runtime_registry.update(active_games=[])
             runtime_registry.update(status="training")
             train_steps_per_cycle = self._steps_per_cycle
-            t1 = time.perf_counter()
-            last_metrics = None
-            for _ in range(train_steps_per_cycle):
-                last_metrics = self.trainer.train_step()
-            train_elapsed = time.perf_counter() - t1
+            last_metrics, train_elapsed = await asyncio.to_thread(self._run_training_steps, train_steps_per_cycle)
             sps = train_steps_per_cycle / max(train_elapsed, 1e-6)
             ema_train_sps = ema_train_sps * (1 - EMA) + sps * EMA if ema_train_sps else sps
             if last_metrics is not None:
@@ -364,6 +396,12 @@ class Orchestrator:
                     current_model=checkpoint_model,
                     best_model=str(runtime_snapshot.get("best_model", "bootstrap")),
                 )
+
+            # Keep training state visible for dashboard polling when training steps complete very quickly.
+            min_training_status_seconds = float(self.raw_cfg.get("training", {}).get("min_training_status_seconds", 1.2))
+            training_status_elapsed = time.perf_counter() - train_status_started
+            if training_status_elapsed < min_training_status_seconds:
+                await asyncio.sleep(min_training_status_seconds - training_status_elapsed)
 
             runtime_registry.update(status="idle")
             await asyncio.sleep(0.05)

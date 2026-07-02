@@ -36,6 +36,7 @@ training:
   checkpoint_interval_steps: 5000
   eval_interval_steps: 5000
   log_interval_steps: 50
+  min_training_status_seconds: 1.2
 
   ema_decay: 0.9995
 
