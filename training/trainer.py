@@ -68,8 +68,8 @@ class Trainer:
         nn = torch.nn
         F = torch.nn.functional
 
-        num_res_blocks = 16
-        num_channels = 192
+        num_res_blocks = 20
+        num_channels = 256
 
         class SEBlock(nn.Module):  # type: ignore[name-defined]
             def __init__(self, channels: int, reduction: int = 16) -> None:
@@ -114,7 +114,9 @@ class Trainer:
                 )
                 self.blocks = nn.Sequential(*[ResidualBlock() for _ in range(num_res_blocks)])
                 self.policy_head = nn.Sequential(
-                    nn.Conv2d(num_channels, 32, 1, bias=True),
+                    nn.Conv2d(num_channels, 64, 1, bias=True),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(64, 32, 1, bias=True),
                     nn.ReLU(inplace=True),
                     nn.Conv2d(32, 1, 1, bias=True),
                 )
@@ -136,6 +138,112 @@ class Trainer:
         self._model = PolicyValueNet().to(self.device)
         self._optimizer = torch.optim.AdamW(self._model.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         return True
+
+    def _checkpoint_paths(self, checkpoint_dir: Path, generation: int) -> tuple[Path, Path]:
+        generation = max(0, int(generation))
+        return checkpoint_dir / f"generation-g{generation}.pt", checkpoint_dir / f"generation-g{generation}.json"
+
+    def _write_checkpoint_payload(
+        self,
+        checkpoint_dir: Path,
+        generation: int,
+        current_model: str,
+        best_model: str,
+    ) -> Path:
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_path = checkpoint_dir / "latest.pt"
+        payload = {
+            "training_step": int(self.step),
+            "generation": max(0, int(generation)),
+            "current_model": current_model,
+            "best_model": best_model,
+            "device": self.device,
+            "amp_enabled": bool(self.amp_enabled),
+            "learning_rate": float(self.learning_rate),
+        }
+        if self._torch is not None and self._model is not None and self._optimizer is not None:
+            payload["model_state_dict"] = self._model.state_dict()
+            payload["optimizer_state_dict"] = self._optimizer.state_dict()
+            self._torch.save(payload, checkpoint_path)
+        else:
+            checkpoint_path = checkpoint_dir / "latest.json"
+            checkpoint_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+        metadata_path = checkpoint_dir / "latest.json"
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "training_step": int(self.step),
+                    "generation": max(0, int(generation)),
+                    "current_model": current_model,
+                    "best_model": best_model,
+                    "device": self.device,
+                    "amp_enabled": bool(self.amp_enabled),
+                    "learning_rate": float(self.learning_rate),
+                    "checkpoint_path": "latest.pt" if checkpoint_path.suffix == ".pt" else checkpoint_path.name,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return checkpoint_path
+
+    def _load_checkpoint_payload(
+        self,
+        checkpoint_dir: Path,
+        checkpoint_name: str,
+        metadata_name: str,
+        board_size: int,
+        action_dim: int,
+    ) -> dict[str, Any] | None:
+        metadata_path = checkpoint_dir / metadata_name
+        checkpoint_path = checkpoint_dir / checkpoint_name
+        if not metadata_path.exists() and not checkpoint_path.exists():
+            return None
+
+        metadata: dict[str, Any] = {}
+        if metadata_path.exists():
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except Exception:
+                metadata = {}
+
+        with self._lock:
+            if self._torch is not None and checkpoint_path.exists() and checkpoint_path.suffix == ".pt":
+                checkpoint = self._torch.load(checkpoint_path, map_location=self.device)
+                self._ensure_model(board_size=board_size, action_dim=action_dim)
+                assert self._model is not None
+                assert self._optimizer is not None
+                try:
+                    self._model.load_state_dict(checkpoint["model_state_dict"])
+                    optimizer_state = checkpoint.get("optimizer_state_dict")
+                    if optimizer_state is not None:
+                        self._optimizer.load_state_dict(optimizer_state)
+                except Exception:
+                    self._model = None
+                    self._optimizer = None
+                    self.step = 0
+                    self._ensure_model(board_size=board_size, action_dim=action_dim)
+                    return None
+                self.step = int(checkpoint.get("training_step", metadata.get("training_step", 0)))
+                return {
+                    "training_step": self.step,
+                    "generation": int(checkpoint.get("generation", metadata.get("generation", 0))),
+                    "current_model": str(checkpoint.get("current_model", metadata.get("current_model", "bootstrap"))),
+                    "best_model": str(checkpoint.get("best_model", metadata.get("best_model", "bootstrap"))),
+                }
+
+            self.step = int(metadata.get("training_step", 0))
+            return {
+                "training_step": self.step,
+                "generation": int(metadata.get("generation", 0)),
+                "current_model": str(metadata.get("current_model", "bootstrap")),
+                "best_model": str(metadata.get("best_model", "bootstrap")),
+            }
 
     def train_step(self) -> TrainMetrics:
         with self._lock:
@@ -188,105 +296,62 @@ class Trainer:
     ) -> Path | None:
         """Persist the latest trainable state so restarts can resume from disk."""
         with self._lock:
-            if self._torch is None or self._model is None or self._optimizer is None:
-                checkpoint_dir.mkdir(parents=True, exist_ok=True)
-                metadata_path = checkpoint_dir / "latest.json"
-                metadata_path.write_text(
+            latest_path = self._write_checkpoint_payload(checkpoint_dir, generation, current_model, best_model)
+
+            generation_path, generation_metadata_path = self._checkpoint_paths(checkpoint_dir, generation)
+            if latest_path.suffix == ".pt" and self._torch is not None and self._model is not None and self._optimizer is not None:
+                generation_payload = {
+                    "training_step": int(self.step),
+                    "generation": max(0, int(generation)),
+                    "current_model": current_model,
+                    "best_model": best_model,
+                    "device": self.device,
+                    "amp_enabled": bool(self.amp_enabled),
+                    "learning_rate": float(self.learning_rate),
+                    "model_state_dict": self._model.state_dict(),
+                    "optimizer_state_dict": self._optimizer.state_dict(),
+                }
+                self._torch.save(generation_payload, generation_path)
+                generation_metadata_path.write_text(
                     json.dumps(
                         {
-                            "training_step": self.step,
+                            "training_step": int(self.step),
                             "generation": max(0, int(generation)),
                             "current_model": current_model,
                             "best_model": best_model,
                             "device": self.device,
+                            "amp_enabled": bool(self.amp_enabled),
+                            "learning_rate": float(self.learning_rate),
+                            "checkpoint_path": generation_path.name,
                         },
                         ensure_ascii=False,
                         indent=2,
                     ),
                     encoding="utf-8",
                 )
-                return metadata_path
 
-            checkpoint_dir.mkdir(parents=True, exist_ok=True)
-            checkpoint_path = checkpoint_dir / "latest.pt"
-            payload = {
-                "training_step": int(self.step),
-                "generation": max(0, int(generation)),
-                "current_model": current_model,
-                "best_model": best_model,
-                "device": self.device,
-                "amp_enabled": bool(self.amp_enabled),
-                "learning_rate": float(self.learning_rate),
-                "model_state_dict": self._model.state_dict(),
-                "optimizer_state_dict": self._optimizer.state_dict(),
-            }
-            self._torch.save(payload, checkpoint_path)
-            metadata_path = checkpoint_dir / "latest.json"
-            metadata_path.write_text(
-                json.dumps(
-                    {
-                        "training_step": int(self.step),
-                        "generation": max(0, int(generation)),
-                        "current_model": current_model,
-                        "best_model": best_model,
-                        "device": self.device,
-                        "amp_enabled": bool(self.amp_enabled),
-                        "learning_rate": float(self.learning_rate),
-                        "checkpoint_path": checkpoint_path.name,
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-            return checkpoint_path
+            return latest_path
 
     def load_checkpoint(self, checkpoint_dir: Path, board_size: int, action_dim: int) -> dict[str, Any] | None:
         """Restore the latest trainable state if a checkpoint exists."""
-        metadata_path = checkpoint_dir / "latest.json"
-        checkpoint_path = checkpoint_dir / "latest.pt"
-        if not metadata_path.exists() and not checkpoint_path.exists():
-            return None
+        return self._load_checkpoint_payload(checkpoint_dir, "latest.pt", "latest.json", board_size, action_dim)
 
-        metadata: dict[str, Any] = {}
-        if metadata_path.exists():
-            try:
-                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            except Exception:
-                metadata = {}
-
-        with self._lock:
-            if self._torch is not None and checkpoint_path.exists():
-                checkpoint = self._torch.load(checkpoint_path, map_location=self.device)
-                self._ensure_model(board_size=board_size, action_dim=action_dim)
-                assert self._model is not None
-                assert self._optimizer is not None
-                try:
-                    self._model.load_state_dict(checkpoint["model_state_dict"])
-                    optimizer_state = checkpoint.get("optimizer_state_dict")
-                    if optimizer_state is not None:
-                        self._optimizer.load_state_dict(optimizer_state)
-                except Exception:
-                    self._model = None
-                    self._optimizer = None
-                    self.step = 0
-                    self._ensure_model(board_size=board_size, action_dim=action_dim)
-                    return None
-                self.step = int(checkpoint.get("training_step", metadata.get("training_step", 0)))
-                return {
-                    "training_step": self.step,
-                    "generation": int(checkpoint.get("generation", metadata.get("generation", 0))),
-                    "current_model": str(checkpoint.get("current_model", metadata.get("current_model", "bootstrap"))),
-                    "best_model": str(checkpoint.get("best_model", metadata.get("best_model", "bootstrap"))),
-                }
-
-            self.step = int(metadata.get("training_step", 0))
-            return {
-                "training_step": self.step,
-                "generation": int(metadata.get("generation", 0)),
-                "current_model": str(metadata.get("current_model", "bootstrap")),
-                "best_model": str(metadata.get("best_model", "bootstrap")),
-            }
+    def load_generation_checkpoint(
+        self,
+        checkpoint_dir: Path,
+        generation: int,
+        board_size: int,
+        action_dim: int,
+    ) -> dict[str, Any] | None:
+        """Restore a generation-specific checkpoint if it exists."""
+        generation_path, generation_metadata_path = self._checkpoint_paths(checkpoint_dir, generation)
+        return self._load_checkpoint_payload(
+            checkpoint_dir,
+            generation_path.name,
+            generation_metadata_path.name,
+            board_size,
+            action_dim,
+        )
 
     def infer_move(self, board: np.ndarray, legal_moves: list[int]) -> int | None:
         """Infer one move from the latest trained model; returns None when unavailable."""

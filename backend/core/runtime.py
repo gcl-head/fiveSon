@@ -17,6 +17,7 @@ class RuntimeState:
     device: str = "unknown"
     current_model: str = "bootstrap"
     best_model: str = "bootstrap"
+    deployed_generation: int = 0
     replay_size: int = 0
     training_step: int = 0
     self_play_games: int = 0
@@ -39,6 +40,7 @@ class RuntimeState:
     heuristic_policy_moves: int = 0
     model_policy_moves: int = 0
     heuristic_bootstrap_games: int = 0
+    quick_eval_games: list[dict[str, Any]] = field(default_factory=list)
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 

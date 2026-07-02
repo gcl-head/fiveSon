@@ -71,9 +71,18 @@
           <span id="parallelSwitchResult" class="eval-result"></span>
         </div>
         <div class="actions" style="margin-top: 10px;">
-          <button id="quickEvalBtn" class="ghost">快速验证（30局）</button>
-          <span id="quickEvalResult" class="eval-result">点击后将评测“当前代 vs 0代基线”</span>
+          <label class="inline-field">
+            评测代次
+            <input id="quickEvalGeneration" type="number" min="0" step="1" value="0" />
+          </label>
+          <label class="inline-field">
+            基线代次
+            <input id="quickEvalBaseline" type="number" min="0" step="1" value="0" />
+          </label>
+          <button id="quickEvalBtn" class="ghost">快速验证（32局）</button>
+          <span id="quickEvalResult" class="eval-result">点击后将评测选定代次</span>
         </div>
+        <div id="quickEvalGrid" class="selfplay-grid" style="margin-top: 12px;"></div>
       </section>
 
       <section class="panel reveal delay-5">

@@ -115,6 +115,28 @@ function updateStatus(data) {
 
   updateParallelButtons(Number(data.target_parallel_self_play_games || data.parallel_self_play_games || 0));
   renderSelfPlayBoards(Array.isArray(data.active_games) ? data.active_games : []);
+  renderQuickEvalBoards(Array.isArray(data.quick_eval_games) ? data.quick_eval_games : []);
+
+  const generationInput = document.getElementById("quickEvalGeneration");
+  const baselineInput = document.getElementById("quickEvalBaseline");
+  const deployedGeneration = Number(data.deployed_generation || 0);
+  if (generationInput) {
+    generationInput.max = String(deployedGeneration);
+    if (!generationInput.dataset.initialized) {
+      generationInput.value = String(deployedGeneration);
+      generationInput.dataset.initialized = "true";
+    }
+    if (document.activeElement !== generationInput) {
+      generationInput.placeholder = `当前 g${deployedGeneration}`;
+    }
+  }
+  if (baselineInput) {
+    baselineInput.max = String(deployedGeneration);
+    if (!baselineInput.dataset.initialized) {
+      baselineInput.value = "0";
+      baselineInput.dataset.initialized = "true";
+    }
+  }
 }
 
 function formatElapsed(ms) {
@@ -148,6 +170,60 @@ function renderSelfPlayBoards(games) {
     if (winner === 1) statusText = `${statusText} 黑胜`;
     if (winner === -1) statusText = `${statusText} 白胜`;
     title.textContent = `并行局 #${workerId} | 手数 ${moveCount} | 用时 ${formatElapsed(elapsed)} | ${statusText}`;
+    card.appendChild(title);
+
+    const board = document.createElement("div");
+    board.className = "live-board";
+    const matrix = Array.isArray(game.board) ? game.board : [];
+    const size = matrix.length > 0 ? matrix.length : 15;
+    board.style.gridTemplateColumns = `repeat(${size}, 1fr)`;
+
+    for (let r = 0; r < size; r += 1) {
+      for (let c = 0; c < size; c += 1) {
+        const value = Number((matrix[r] || [])[c] ?? 0);
+        const cell = document.createElement("div");
+        cell.className = "live-cell";
+        if (value !== 0) {
+          const stone = document.createElement("span");
+          stone.className = `stone ${value === 1 ? "black" : "white"}`;
+          cell.appendChild(stone);
+        }
+        board.appendChild(cell);
+      }
+    }
+
+    card.appendChild(board);
+    grid.appendChild(card);
+  }
+}
+
+function renderQuickEvalBoards(games) {
+  const grid = document.getElementById("quickEvalGrid");
+  if (!grid) return;
+
+  if (games.length === 0) {
+    grid.innerHTML = "<div class='eval-result'>暂无快速验证局面</div>";
+    return;
+  }
+
+  grid.innerHTML = "";
+  for (const game of games) {
+    const card = document.createElement("div");
+    card.className = "selfplay-card";
+
+    const title = document.createElement("div");
+    title.className = "selfplay-title";
+    const gameId = Number(game.game_id ?? 0);
+    const moveCount = Number(game.move_count ?? 0);
+    const winner = Number(game.winner ?? 0);
+    const done = Boolean(game.done);
+    const elapsed = Number(game.elapsed_ms ?? 0);
+    const generation = Number(game.generation ?? 0);
+    const baseline = Number(game.baseline_generation ?? 0);
+    let statusText = done ? "已结束" : "进行中";
+    if (winner === 1) statusText = `${statusText} 黑胜`;
+    if (winner === -1) statusText = `${statusText} 白胜`;
+    title.textContent = `验证局 #${gameId} | g${generation} vs g${baseline} | 手数 ${moveCount} | 用时 ${formatElapsed(elapsed)} | ${statusText}`;
     card.appendChild(title);
 
     const board = document.createElement("div");
@@ -359,6 +435,10 @@ async function setParallelGames(count) {
 async function runQuickEval(games = 30) {
   const resultNode = document.getElementById("quickEvalResult");
   const btn = document.getElementById("quickEvalBtn");
+  const generationInput = document.getElementById("quickEvalGeneration");
+  const baselineInput = document.getElementById("quickEvalBaseline");
+  const generation = Number(generationInput?.value || 0);
+  const baselineGeneration = Number(baselineInput?.value || 0);
   if (resultNode) resultNode.textContent = "评测中，请稍候...";
   if (btn) btn.disabled = true;
 
@@ -366,7 +446,7 @@ async function runQuickEval(games = 30) {
     const res = await fetch("/api/eval/quick", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ games }),
+      body: JSON.stringify({ games, generation, baseline_generation: baselineGeneration }),
     });
     if (!res.ok) {
       throw new Error("评测接口调用失败");
@@ -376,7 +456,7 @@ async function runQuickEval(games = 30) {
     const avgMs = Number(data.avg_game_ms || 0).toFixed(1);
     const avgMoves = Number(data.avg_moves || 0).toFixed(1);
     if (resultNode) {
-      resultNode.textContent = `当前代 g${data.generation} vs 基线 g${data.baseline_generation}: ${data.wins}-${data.losses}-${data.draws}，胜率 ${wr}% | 平均 ${avgMoves} 手/${avgMs}ms 每局`;
+      resultNode.textContent = `g${data.generation} vs g${data.baseline_generation}: ${data.wins}-${data.losses}-${data.draws}，胜率 ${wr}% | 平均 ${avgMoves} 手/${avgMs}ms 每局`;
     }
   } catch (err) {
     console.error(err);
@@ -391,7 +471,7 @@ document.getElementById("resumeBtn").addEventListener("click", () => control("re
 document.getElementById("refreshBtn").addEventListener("click", refresh);
 document.getElementById("newGameBtn").addEventListener("click", resetGame);
 document.getElementById("newGameBtn").addEventListener("click", hideIngestBanner);
-document.getElementById("quickEvalBtn").addEventListener("click", () => runQuickEval(30));
+document.getElementById("quickEvalBtn").addEventListener("click", () => runQuickEval(32));
 document.querySelectorAll(".parallel-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
     const count = Number(btn.dataset.parallel || "8");

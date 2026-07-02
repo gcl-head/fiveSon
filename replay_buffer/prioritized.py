@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any
 
 import numpy as np
@@ -27,21 +28,25 @@ class PrioritizedReplayBuffer:
         self.prioritized = prioritized
         self.alpha = alpha
         self._items: deque[ReplaySample] = deque(maxlen=capacity)
+        self._lock = Lock()
 
     def __len__(self) -> int:
-        return len(self._items)
+        with self._lock:
+            return len(self._items)
 
     def push(self, sample: ReplaySample) -> None:
-        self._items.append(sample)
+        with self._lock:
+            self._items.append(sample)
 
     def sample(self, batch_size: int) -> list[ReplaySample]:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        if len(self._items) == 0:
-            return []
+        with self._lock:
+            if len(self._items) == 0:
+                return []
 
-        batch_size = min(batch_size, len(self._items))
-        items = list(self._items)
+            batch_size = min(batch_size, len(self._items))
+            items = list(self._items)
 
         if not self.prioritized:
             idx = np.random.choice(len(items), size=batch_size, replace=False)

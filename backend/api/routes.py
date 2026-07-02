@@ -21,6 +21,8 @@ class QuickEvalRequest(BaseModel):
     """Request body for quick validation matches."""
 
     games: int = 30
+    generation: int | None = None
+    baseline_generation: int = 0
 
 
 @router.get("/health")
@@ -90,7 +92,14 @@ def game_move(req: MoveRequest) -> dict[str, object]:
 
 @router.post("/eval/quick")
 def quick_eval(req: QuickEvalRequest) -> dict[str, object]:
-    result = game_service.quick_eval(games=req.games)
+    try:
+        result = game_service.quick_eval(
+            games=req.games,
+            generation=req.generation,
+            baseline_generation=req.baseline_generation,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "games": result.games,
         "generation": result.generation,

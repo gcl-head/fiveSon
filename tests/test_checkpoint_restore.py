@@ -28,6 +28,7 @@ def test_trainer_checkpoint_round_trip(tmp_path: Path) -> None:
         best_model="candidate",
     )
     assert saved is not None
+    assert (checkpoint_dir / "generation-g3.pt").exists()
 
     restored = Trainer(
         PrioritizedReplayBuffer(capacity=8, prioritized=True, alpha=0.6),
@@ -43,6 +44,11 @@ def test_trainer_checkpoint_round_trip(tmp_path: Path) -> None:
     assert meta["generation"] == 3
     assert meta["current_model"] == "checkpoint-g3-s1"
     assert meta["best_model"] == "candidate"
+
+    generation_restored = restored.load_generation_checkpoint(checkpoint_dir, generation=3, board_size=15, action_dim=225)
+    assert generation_restored is not None
+    assert generation_restored["generation"] == 3
+    assert generation_restored["current_model"] == "checkpoint-g3-s1"
 
     move = restored.infer_move(board, [0, 1, 2])
     assert move is not None

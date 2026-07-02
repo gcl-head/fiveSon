@@ -87,6 +87,7 @@ class Orchestrator:
                 training_step=int(restored.get("training_step", 0)),
                 current_model=restored_current_model,
                 best_model=str(restored.get("best_model", "bootstrap")),
+                deployed_generation=training_bridge.deployed_generation(),
             )
         runtime_registry.update(
             steps_per_cycle=self._steps_per_cycle,
@@ -94,6 +95,8 @@ class Orchestrator:
             parallel_self_play_games=self._parallel_self_play_games,
             target_parallel_self_play_games=self._parallel_self_play_games,
             heuristic_bootstrap_games=int(self.raw_cfg.get("self_play", {}).get("heuristic_bootstrap_games", 80)),
+            quick_eval_games=[],
+            deployed_generation=training_bridge.deployed_generation(),
         )
 
     def _set_parallel_self_play_games(self, count: int) -> None:
@@ -137,6 +140,136 @@ class Orchestrator:
                 del self._active_games[worker_id]
             active = [self._active_games[i] for i in sorted(self._active_games.keys())]
         runtime_registry.update(active_games=active)
+
+    def _apply_self_play_results(self, games: list[SelfPlayResult], batch_ms: float) -> None:
+        total_moves = 0
+        total_game_ms = 0.0
+        total_heuristic_moves = 0
+        total_model_moves = 0
+        for game in games:
+            total_moves += game.moves
+            total_game_ms += game.elapsed_ms
+            total_heuristic_moves += game.heuristic_moves
+            total_model_moves += game.model_moves
+            for sample in game.samples:
+                self.replay.push(sample)
+
+        game_count = len(games)
+        game_ms = total_game_ms / max(1, game_count)
+        game_moves = total_moves / max(1, game_count)
+        games_per_min = (game_count * 60_000.0) / max(batch_ms, 1.0)
+
+        runtime_snapshot = runtime_registry.snapshot()
+        runtime_registry.update(
+            self_play_games=int(runtime_snapshot.get("self_play_games", 0)) + game_count,
+            replay_size=len(self.replay),
+            avg_game_ms=round(game_ms, 1),
+            avg_game_moves=int(game_moves),
+            games_per_min=round(games_per_min, 1),
+            parallel_self_play_games=self._parallel_self_play_games,
+            heuristic_policy_moves=int(runtime_snapshot.get("heuristic_policy_moves", 0)) + total_heuristic_moves,
+            model_policy_moves=int(runtime_snapshot.get("model_policy_moves", 0)) + total_model_moves,
+        )
+
+    async def _self_play_loop(self) -> None:
+        while True:
+            snapshot = runtime_registry.snapshot()
+            target_parallel = int(snapshot.get("target_parallel_self_play_games", self._parallel_self_play_games))
+            if target_parallel != self._parallel_self_play_games:
+                self._set_parallel_self_play_games(target_parallel)
+
+            if bool(snapshot.get("paused", False)):
+                runtime_registry.update(status="paused", active_games=[])
+                await asyncio.sleep(0.2)
+                continue
+
+            runtime_registry.update(status="self_play")
+            t0 = time.perf_counter()
+            games = await self._run_self_play_cycle()
+            batch_ms = (time.perf_counter() - t0) * 1000.0
+            self._apply_self_play_results(games, batch_ms)
+            await asyncio.sleep(0.01)
+
+    async def _training_loop(self) -> None:
+        cycle = 0
+        best_elo = 1200.0
+        ema_train_sps: float = 0.0
+        EMA = 0.1
+
+        while True:
+            snapshot = runtime_registry.snapshot()
+            if bool(snapshot.get("paused", False)):
+                runtime_registry.update(status="paused")
+                await asyncio.sleep(0.2)
+                continue
+
+            if len(self.replay) == 0:
+                await asyncio.sleep(0.05)
+                continue
+
+            cycle += 1
+            train_status_started = time.perf_counter()
+            runtime_registry.update(status="training")
+            train_steps_per_cycle = self._steps_per_cycle
+            last_metrics, train_elapsed = await asyncio.to_thread(self._run_training_steps, train_steps_per_cycle)
+            sps = train_steps_per_cycle / max(train_elapsed, 1e-6)
+            ema_train_sps = ema_train_sps * (1 - EMA) + sps * EMA if ema_train_sps else sps
+
+            if last_metrics is not None:
+                runtime_registry.update(
+                    training_step=last_metrics.step,
+                    latest_loss=last_metrics.loss,
+                    train_steps_per_sec=round(ema_train_sps, 1),
+                )
+                switched_model = training_bridge.maybe_switch_model(last_metrics.step)
+                if switched_model is not None:
+                    runtime_registry.update(current_model=switched_model)
+            else:
+                switched_model = None
+
+            if cycle % 20 == 0:
+                runtime_registry.update(status="arena")
+                result = self.arena.evaluate(self.trainer.infer_move, best_elo)
+                best_elo = result.best_elo if not result.promoted else result.challenger_elo
+                arena_snapshot = runtime_registry.snapshot()
+                best_model_name = str(arena_snapshot.get("best_model", "bootstrap"))
+                if result.promoted:
+                    promoted_model_name = str(arena_snapshot.get("current_model", "bootstrap"))
+                    if promoted_model_name == "bootstrap":
+                        promoted_model_name = (
+                            f"checkpoint-g{training_bridge.deployed_generation()}-s"
+                            f"{int(arena_snapshot.get('training_step', 0))}"
+                        )
+                        runtime_registry.update(current_model=promoted_model_name)
+                    best_model_name = promoted_model_name
+                runtime_registry.update(
+                    arena_games=int(arena_snapshot.get("arena_games", 0)) + result.games,
+                    latest_elo=best_elo,
+                    best_model=best_model_name,
+                )
+
+            runtime_snapshot = runtime_registry.snapshot()
+            if last_metrics is not None and (
+                last_metrics.step % self._checkpoint_interval_steps == 0 or switched_model is not None or cycle == 1
+            ):
+                checkpoint_model = str(runtime_snapshot.get("current_model", "bootstrap"))
+                if checkpoint_model == "bootstrap":
+                    checkpoint_model = f"checkpoint-g{training_bridge.deployed_generation()}-s{last_metrics.step}"
+                    runtime_registry.update(current_model=checkpoint_model)
+                self.trainer.save_checkpoint(
+                    self._checkpoint_dir,
+                    generation=training_bridge.deployed_generation(),
+                    current_model=checkpoint_model,
+                    best_model=str(runtime_snapshot.get("best_model", "bootstrap")),
+                )
+
+            min_training_status_seconds = float(self.raw_cfg.get("training", {}).get("min_training_status_seconds", 1.2))
+            training_status_elapsed = time.perf_counter() - train_status_started
+            if training_status_elapsed < min_training_status_seconds:
+                await asyncio.sleep(min_training_status_seconds - training_status_elapsed)
+
+            runtime_registry.update(status="idle")
+            await asyncio.sleep(0.05)
 
     async def _run_self_play_cycle(self) -> list[SelfPlayResult]:
         self_play_cfg = self.raw_cfg.get("self_play", {})
@@ -293,7 +426,6 @@ class Orchestrator:
         """Run forever-training cycles until interrupted."""
         cycle = 0
         best_elo = 1200.0
-        # EMA 计数器
         ema_game_ms: float = 0.0
         ema_game_moves: float = 0.0
         ema_train_sps: float = 0.0
@@ -318,13 +450,11 @@ class Orchestrator:
             batch_ms = (time.perf_counter() - t0) * 1000.0
             total_moves = 0
             total_game_ms = 0.0
-            total_samples = 0
             total_heuristic_moves = 0
             total_model_moves = 0
             for game in games:
                 total_moves += game.moves
                 total_game_ms += game.elapsed_ms
-                total_samples += len(game.samples)
                 total_heuristic_moves += game.heuristic_moves
                 total_model_moves += game.model_moves
                 for sample in game.samples:
@@ -349,14 +479,12 @@ class Orchestrator:
                 model_policy_moves=int(runtime_registry.snapshot().get("model_policy_moves", 0)) + total_model_moves,
             )
 
-            # Pause may be requested during self-play. Do not enter training stage in that case.
             if bool(runtime_registry.snapshot().get("paused", False)):
                 runtime_registry.update(status="paused", active_games=[])
                 await asyncio.sleep(0.05)
                 continue
 
             train_status_started = time.perf_counter()
-            # Training stage has no live self-play boards; clear stale snapshots before switching status.
             runtime_registry.update(active_games=[])
             runtime_registry.update(status="training")
             train_steps_per_cycle = self._steps_per_cycle
@@ -365,23 +493,36 @@ class Orchestrator:
             ema_train_sps = ema_train_sps * (1 - EMA) + sps * EMA if ema_train_sps else sps
             if last_metrics is not None:
                 metrics = last_metrics
-            runtime_registry.update(
-                training_step=metrics.step,
-                latest_loss=metrics.loss,
-                train_steps_per_sec=round(ema_train_sps, 1),
-            )
-            switched_model = training_bridge.maybe_switch_model(metrics.step)
-            if switched_model is not None:
-                runtime_registry.update(current_model=switched_model)
+                runtime_registry.update(
+                    training_step=metrics.step,
+                    latest_loss=metrics.loss,
+                    train_steps_per_sec=round(ema_train_sps, 1),
+                )
+                switched_model = training_bridge.maybe_switch_model(metrics.step)
+                if switched_model is not None:
+                    runtime_registry.update(current_model=switched_model, deployed_generation=training_bridge.deployed_generation())
+            else:
+                continue
 
             if cycle % 20 == 0:
                 runtime_registry.update(status="arena")
                 result = self.arena.evaluate(self.trainer.infer_move, best_elo)
                 best_elo = result.best_elo if not result.promoted else result.challenger_elo
+                arena_snapshot = runtime_registry.snapshot()
+                best_model_name = str(arena_snapshot.get("best_model", "bootstrap"))
+                if result.promoted:
+                    promoted_model_name = str(arena_snapshot.get("current_model", "bootstrap"))
+                    if promoted_model_name == "bootstrap":
+                        promoted_model_name = (
+                            f"checkpoint-g{training_bridge.deployed_generation()}-s"
+                            f"{int(arena_snapshot.get('training_step', 0))}"
+                        )
+                        runtime_registry.update(current_model=promoted_model_name)
+                    best_model_name = promoted_model_name
                 runtime_registry.update(
-                    arena_games=runtime_registry.snapshot()["arena_games"] + result.games,
+                    arena_games=int(arena_snapshot.get("arena_games", 0)) + result.games,
                     latest_elo=best_elo,
-                    best_model="candidate" if result.promoted else "bootstrap",
+                    best_model=best_model_name,
                 )
 
             runtime_snapshot = runtime_registry.snapshot()
@@ -397,7 +538,6 @@ class Orchestrator:
                     best_model=str(runtime_snapshot.get("best_model", "bootstrap")),
                 )
 
-            # Keep training state visible for dashboard polling when training steps complete very quickly.
             min_training_status_seconds = float(self.raw_cfg.get("training", {}).get("min_training_status_seconds", 1.2))
             training_status_elapsed = time.perf_counter() - train_status_started
             if training_status_elapsed < min_training_status_seconds:
