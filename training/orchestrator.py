@@ -72,6 +72,15 @@ class Orchestrator:
 
         runtime_registry.update(status="boot", device=self.device_cfg.device)
         self._steps_per_cycle = int(self.raw_cfg["training"].get("steps_per_cycle", 16))
+        self._min_replay_size_before_train = max(
+            1,
+            int(
+                self.raw_cfg["training"].get(
+                    "min_replay_size_before_train",
+                    max(self.device_cfg.batch_size * 4, 2048),
+                )
+            ),
+        )
         self._checkpoint_interval_steps = max(1, int(self.raw_cfg["training"].get("checkpoint_interval_steps", 5000)))
         restored = self.trainer.load_checkpoint(
             self._checkpoint_dir,
@@ -92,11 +101,13 @@ class Orchestrator:
         runtime_registry.update(
             steps_per_cycle=self._steps_per_cycle,
             batch_size=self.device_cfg.batch_size,
+            min_replay_size_before_train=self._min_replay_size_before_train,
             parallel_self_play_games=self._parallel_self_play_games,
             target_parallel_self_play_games=self._parallel_self_play_games,
             heuristic_bootstrap_games=int(self.raw_cfg.get("self_play", {}).get("heuristic_bootstrap_games", 80)),
             quick_eval_games=[],
             deployed_generation=training_bridge.deployed_generation(),
+            candidate_generation=training_bridge.deployed_generation(),
         )
 
     def _set_parallel_self_play_games(self, count: int) -> None:
@@ -203,7 +214,8 @@ class Orchestrator:
                 await asyncio.sleep(0.2)
                 continue
 
-            if len(self.replay) == 0:
+            if len(self.replay) < self._min_replay_size_before_train:
+                runtime_registry.update(status="self_play")
                 await asyncio.sleep(0.05)
                 continue
 
@@ -220,10 +232,9 @@ class Orchestrator:
                     training_step=last_metrics.step,
                     latest_loss=last_metrics.loss,
                     train_steps_per_sec=round(ema_train_sps, 1),
+                    candidate_generation=training_bridge.candidate_generation(last_metrics.step),
                 )
-                switched_model = training_bridge.maybe_switch_model(last_metrics.step)
-                if switched_model is not None:
-                    runtime_registry.update(current_model=switched_model)
+                switched_model = None
             else:
                 switched_model = None
 
@@ -235,12 +246,15 @@ class Orchestrator:
                 best_model_name = str(arena_snapshot.get("best_model", "bootstrap"))
                 if result.promoted:
                     promoted_model_name = str(arena_snapshot.get("current_model", "bootstrap"))
-                    if promoted_model_name == "bootstrap":
-                        promoted_model_name = (
-                            f"checkpoint-g{training_bridge.deployed_generation()}-s"
-                            f"{int(arena_snapshot.get('training_step', 0))}"
+                    promoted = training_bridge.promote_generation_if_eligible(last_metrics.step if last_metrics is not None else 0)
+                    if promoted is not None:
+                        new_generation, promoted_model_name = promoted
+                        switched_model = promoted_model_name
+                        runtime_registry.update(
+                            current_model=promoted_model_name,
+                            deployed_generation=new_generation,
+                            candidate_generation=new_generation,
                         )
-                        runtime_registry.update(current_model=promoted_model_name)
                     best_model_name = promoted_model_name
                 runtime_registry.update(
                     arena_games=int(arena_snapshot.get("arena_games", 0)) + result.games,
@@ -484,6 +498,11 @@ class Orchestrator:
                 await asyncio.sleep(0.05)
                 continue
 
+            if len(self.replay) < self._min_replay_size_before_train:
+                runtime_registry.update(status="self_play")
+                await asyncio.sleep(0.05)
+                continue
+
             train_status_started = time.perf_counter()
             runtime_registry.update(active_games=[])
             runtime_registry.update(status="training")
@@ -497,10 +516,9 @@ class Orchestrator:
                     training_step=metrics.step,
                     latest_loss=metrics.loss,
                     train_steps_per_sec=round(ema_train_sps, 1),
+                    candidate_generation=training_bridge.candidate_generation(metrics.step),
                 )
-                switched_model = training_bridge.maybe_switch_model(metrics.step)
-                if switched_model is not None:
-                    runtime_registry.update(current_model=switched_model, deployed_generation=training_bridge.deployed_generation())
+                switched_model = None
             else:
                 continue
 
@@ -512,12 +530,15 @@ class Orchestrator:
                 best_model_name = str(arena_snapshot.get("best_model", "bootstrap"))
                 if result.promoted:
                     promoted_model_name = str(arena_snapshot.get("current_model", "bootstrap"))
-                    if promoted_model_name == "bootstrap":
-                        promoted_model_name = (
-                            f"checkpoint-g{training_bridge.deployed_generation()}-s"
-                            f"{int(arena_snapshot.get('training_step', 0))}"
+                    promoted = training_bridge.promote_generation_if_eligible(metrics.step)
+                    if promoted is not None:
+                        new_generation, promoted_model_name = promoted
+                        switched_model = promoted_model_name
+                        runtime_registry.update(
+                            current_model=promoted_model_name,
+                            deployed_generation=new_generation,
+                            candidate_generation=new_generation,
                         )
-                        runtime_registry.update(current_model=promoted_model_name)
                     best_model_name = promoted_model_name
                 runtime_registry.update(
                     arena_games=int(arena_snapshot.get("arena_games", 0)) + result.games,

@@ -8,6 +8,10 @@ def test_model_switch_interval() -> None:
     bridge = TrainingBridge()
     bridge.configure({"webplay": {"model_switch_interval_steps": 10}})
 
+    assert bridge.candidate_generation(0) == 0
+    assert bridge.candidate_generation(9) == 0
+    assert bridge.candidate_generation(10) == 1
+
     assert bridge.maybe_switch_model(9) is None
     first = bridge.maybe_switch_model(10)
     assert first is not None
@@ -17,6 +21,21 @@ def test_model_switch_interval() -> None:
     second = bridge.maybe_switch_model(20)
     assert second is not None
     assert "g2" in second
+
+
+def test_promote_generation_requires_candidate_progress() -> None:
+    bridge = TrainingBridge()
+    bridge.configure({"webplay": {"model_switch_interval_steps": 10}})
+
+    assert bridge.promote_generation_if_eligible(9) is None
+    promoted = bridge.promote_generation_if_eligible(10)
+    assert promoted is not None
+    generation, model_name = promoted
+    assert generation == 1
+    assert "g1" in model_name
+
+    # No duplicate promotion for the same candidate generation.
+    assert bridge.promote_generation_if_eligible(19) is None
 
 
 def test_human_ingestion_uses_high_priority() -> None:

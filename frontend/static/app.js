@@ -20,8 +20,10 @@ let gameSize = 15;
 let gameWinner = 0;
 let statusHoldUntilMs = 0;
 let heldStatus = "";
+let quickEvalBoardCache = [];
 
 const TRAINING_STATUS_HOLD_MS = 2000;
+const QUICK_EVAL_DISPLAY_COUNT = 32;
 
 const STATUS_LABELS = {
   boot: "启动中",
@@ -201,13 +203,42 @@ function renderQuickEvalBoards(games) {
   const grid = document.getElementById("quickEvalGrid");
   if (!grid) return;
 
-  if (games.length === 0) {
+  // Keep latest snapshots visible even when backend clears finished quick-eval games.
+  if (games.length > 0) {
+    for (let i = 0; i < QUICK_EVAL_DISPLAY_COUNT; i += 1) {
+      if (games[i]) {
+        quickEvalBoardCache[i] = games[i];
+      }
+    }
+  }
+
+  if (quickEvalBoardCache.length === 0) {
     grid.innerHTML = "<div class='eval-result'>暂无快速验证局面</div>";
     return;
   }
 
+  const displayGames = [];
+  for (let i = 0; i < QUICK_EVAL_DISPLAY_COUNT; i += 1) {
+    const cachedGame = quickEvalBoardCache[i];
+    if (cachedGame) {
+      displayGames.push(cachedGame);
+      continue;
+    }
+    displayGames.push({
+      game_id: i + 1,
+      move_count: 0,
+      winner: 0,
+      done: false,
+      elapsed_ms: 0,
+      generation: 0,
+      baseline_generation: 0,
+      board: [],
+      placeholder: true,
+    });
+  }
+
   grid.innerHTML = "";
-  for (const game of games) {
+  for (const game of displayGames) {
     const card = document.createElement("div");
     card.className = "selfplay-card";
 
@@ -220,10 +251,15 @@ function renderQuickEvalBoards(games) {
     const elapsed = Number(game.elapsed_ms ?? 0);
     const generation = Number(game.generation ?? 0);
     const baseline = Number(game.baseline_generation ?? 0);
-    let statusText = done ? "已结束" : "进行中";
-    if (winner === 1) statusText = `${statusText} 黑胜`;
-    if (winner === -1) statusText = `${statusText} 白胜`;
-    title.textContent = `验证局 #${gameId} | g${generation} vs g${baseline} | 手数 ${moveCount} | 用时 ${formatElapsed(elapsed)} | ${statusText}`;
+    const isPlaceholder = Boolean(game.placeholder);
+    if (isPlaceholder) {
+      title.textContent = `验证局 #${gameId} | 等待对局数据`;
+    } else {
+      let statusText = done ? "已结束" : "进行中";
+      if (winner === 1) statusText = `${statusText} 黑胜`;
+      if (winner === -1) statusText = `${statusText} 白胜`;
+      title.textContent = `验证局 #${gameId} | g${generation} vs g${baseline} | 手数 ${moveCount} | 用时 ${formatElapsed(elapsed)} | ${statusText}`;
+    }
     card.appendChild(title);
 
     const board = document.createElement("div");
@@ -439,6 +475,18 @@ async function runQuickEval(games = 30) {
   const baselineInput = document.getElementById("quickEvalBaseline");
   const generation = Number(generationInput?.value || 0);
   const baselineGeneration = Number(baselineInput?.value || 0);
+  quickEvalBoardCache = Array.from({ length: QUICK_EVAL_DISPLAY_COUNT }, (_, i) => ({
+    game_id: i + 1,
+    move_count: 0,
+    winner: 0,
+    done: false,
+    elapsed_ms: 0,
+    generation,
+    baseline_generation: baselineGeneration,
+    board: [],
+    placeholder: true,
+  }));
+  renderQuickEvalBoards([]);
   if (resultNode) resultNode.textContent = "评测中，请稍候...";
   if (btn) btn.disabled = true;
 

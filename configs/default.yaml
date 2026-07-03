@@ -37,6 +37,7 @@ training:
   eval_interval_steps: 5000
   log_interval_steps: 50
   min_training_status_seconds: 1.2
+  min_replay_size_before_train: 50000
 
   ema_decay: 0.9995
 
@@ -53,7 +54,7 @@ mcts:
   transposition_table_size: 2000000
 
 replay_buffer:
-  capacity: 1000000
+  capacity: 300000
   prioritized: true
   alpha: 0.6
   beta_start: 0.4

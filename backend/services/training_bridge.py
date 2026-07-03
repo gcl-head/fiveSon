@@ -69,6 +69,23 @@ class TrainingBridge:
             self._generation = generation
             return f"checkpoint-g{generation}-s{training_step}"
 
+    def candidate_generation(self, training_step: int) -> int:
+        """Compute checkpoint generation implied by training step."""
+        with self._lock:
+            interval = self._config.model_switch_interval_steps
+        return max(0, int(training_step) // max(1, int(interval)))
+
+    def promote_generation_if_eligible(self, training_step: int) -> tuple[int, str] | None:
+        """Promote deployed generation only when caller decides strength gate passed."""
+        with self._lock:
+            interval = self._config.model_switch_interval_steps
+            candidate = int(training_step) // max(1, int(interval))
+            if candidate <= self._generation:
+                return None
+
+            self._generation = candidate
+            return self._generation, f"checkpoint-g{self._generation}-s{int(training_step)}"
+
     def restore_generation(self, generation: int) -> None:
         """Restore deployed generation after process restart."""
         with self._lock:

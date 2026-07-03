@@ -9,6 +9,7 @@ import numpy as np
 
 from engine.board import Board, BoardState
 from evaluation.elo import expected_score, update_elo
+from self_play.policy_heuristic import GomokuHeuristicPolicy
 
 
 @dataclass(slots=True)
@@ -32,27 +33,23 @@ class Arena:
         self.games = games
         self.promotion_win_rate = promotion_win_rate
         self.board = Board(size=board_size, win_length=win_length)
+        self.heuristic = GomokuHeuristicPolicy(size=board_size)
         self._rng = np.random.default_rng()
 
     def _baseline_move(self, state: BoardState, legal: list[int]) -> int:
-        center = self.board.size // 2
-        center_move = center * self.board.size + center
-        if center_move in legal:
-            return center_move
+        if not legal:
+            return -1
 
-        occupied = np.argwhere(state.board != 0)
-        if occupied.size == 0:
+        heuristic_policy = self.heuristic.get_policy(state.board.tolist(), state.to_play)
+        probs = np.array([
+            max(0.0, float(heuristic_policy.get(divmod(move, self.board.size), 0.0))) for move in legal
+        ], dtype=np.float64)
+        prob_sum = float(probs.sum())
+        if prob_sum <= 0.0:
             return int(self._rng.choice(np.asarray(legal, dtype=np.int64)))
-
-        scored: list[tuple[float, int]] = []
-        for move in legal:
-            r, c = divmod(move, self.board.size)
-            dist = float(np.min(np.abs(occupied[:, 0] - r) + np.abs(occupied[:, 1] - c)))
-            scored.append((dist, move))
-
-        scored.sort(key=lambda x: x[0])
-        top_k = [m for _, m in scored[: min(6, len(scored))]]
-        return int(self._rng.choice(np.asarray(top_k, dtype=np.int64)))
+        probs /= prob_sum
+        idx = int(self._rng.choice(np.arange(len(legal)), p=probs))
+        return int(legal[idx])
 
     def _play_one_game(self, challenger_move_fn: Callable[[np.ndarray, list[int]], int | None], challenger_is_black: bool) -> int:
         state = self.board.initial_state()

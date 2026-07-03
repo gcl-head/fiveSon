@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
+from multiprocessing import get_context
 from pathlib import Path
 from collections.abc import Callable
 from threading import Lock
@@ -362,22 +363,12 @@ class GameService:
         t0 = time.perf_counter()
         self._clear_quick_eval_games()
 
-        def run_one(game_id: int) -> tuple[int, int, int, int]:
-            snapshot, game_wins, game_losses, game_draws, game_moves, _ = self._play_quick_eval_game(
-                game_id=game_id,
-                generation=generation,
-                baseline_generation=baseline_generation,
-                challenger_move_fn=challenger_move_fn,
-                baseline_move_fn=baseline_move_fn,
-            )
-            del snapshot
-            return game_wins, game_losses, game_draws, game_moves
-
         max_workers = min(32, games)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(run_one, game_id) for game_id in range(games)]
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=get_context("spawn")) as executor:
+            futures = [executor.submit(_run_quick_eval_game, game_id, generation, baseline_generation) for game_id in range(games)]
             for future in as_completed(futures):
-                game_wins, game_losses, game_draws, game_moves = future.result()
+                snapshot, game_wins, game_losses, game_draws, game_moves, _ = future.result()
+                self._publish_quick_eval_game(snapshot)
                 wins += game_wins
                 losses += game_losses
                 draws += game_draws
@@ -411,6 +402,28 @@ class GameService:
                 human_samples=int(snapshot.get("human_samples", 0)) + inserted,
             )
         self._trajectory = []
+
+
+def _run_quick_eval_game(
+    game_id: int,
+    generation: int,
+    baseline_generation: int,
+) -> tuple[QuickEvalGameState, int, int, int, int, float]:
+    challenger_move_fn = None if generation == 0 else game_service._cache_generation_model(generation)
+    if generation > 0 and challenger_move_fn is None:
+        raise ValueError(f"generation {generation} checkpoint not found")
+
+    baseline_move_fn = None if baseline_generation == 0 else game_service._cache_generation_model(baseline_generation)
+    if baseline_generation > 0 and baseline_move_fn is None:
+        raise ValueError(f"baseline generation {baseline_generation} checkpoint not found")
+
+    return game_service._play_quick_eval_game(
+        game_id=game_id,
+        generation=generation,
+        baseline_generation=baseline_generation,
+        challenger_move_fn=challenger_move_fn,
+        baseline_move_fn=baseline_move_fn,
+    )
 
 
 game_service = GameService()
