@@ -34,11 +34,18 @@ python tools/system_probe.py --output system_report.md
 python scripts/run_backend.py
 ```
 
+Recommended for production-like long runs (auto health-check and restart):
+
+```bash
+python scripts/backend_guard.py
+```
+
 Then open `http://127.0.0.1:8000` to access the control center.
 
 - The orchestrator loop auto-starts with the backend process.
 - The dashboard updates runtime metrics by websocket.
 - The board supports click-to-play human vs AI with New Game reset.
+- When pressure spikes, overload guard will reduce parallel self-play automatically and can auto-pause training.
 
 5. (Optional) Start standalone orchestrator loop (self-play/train/eval skeleton):
 

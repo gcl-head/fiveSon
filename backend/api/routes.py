@@ -43,7 +43,13 @@ def pause_training() -> dict[str, str]:
 
 @router.post("/control/resume")
 def resume_training() -> dict[str, str]:
-    runtime_registry.update(status="idle", paused=False)
+    runtime_registry.update(
+        status="idle",
+        paused=False,
+        auto_paused=False,
+        overload_streak=0,
+        last_overload_reason="",
+    )
     return {"message": "training resumed"}
 
 

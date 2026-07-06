@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import time
+from datetime import UTC, datetime
 from multiprocessing import Process, get_context
 from multiprocessing.context import BaseContext
 from multiprocessing.connection import Connection
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 
 import numpy as np
 
@@ -21,6 +23,9 @@ from replay_buffer.prioritized import PrioritizedReplayBuffer
 from self_play.process_worker import ProcessSelfPlayTask, play_one_game_process
 from self_play.worker import SelfPlayResult
 from training.trainer import TrainMetrics, Trainer
+
+
+logger = logging.getLogger(__name__)
 
 
 class Orchestrator:
@@ -50,7 +55,17 @@ class Orchestrator:
         )
         self._active_games: dict[int, dict[str, object]] = {}
         self._active_games_lock = Lock()
+        self._stop_event = Event()
         self._self_play_games_completed = 0
+        overload_cfg = self.raw_cfg.get("overload_guard", {})
+        self._overload_guard_enabled = bool(overload_cfg.get("enabled", True))
+        self._overload_max_self_play_cycle_ms = float(overload_cfg.get("max_self_play_cycle_ms", 5000))
+        self._overload_max_training_block_seconds = float(overload_cfg.get("max_training_block_seconds", 18.0))
+        self._overload_backoff_factor = float(overload_cfg.get("parallel_backoff_factor", 0.5))
+        self._overload_min_parallel_games = max(1, int(overload_cfg.get("min_parallel_games", 4)))
+        self._overload_pause_after_consecutive = max(1, int(overload_cfg.get("pause_after_consecutive", 3)))
+        self._overload_streak = 0
+        self._overload_events = 0
         self.trainer = Trainer(
             self.replay,
             board_size=self.app_cfg.board_size,
@@ -108,7 +123,57 @@ class Orchestrator:
             quick_eval_games=[],
             deployed_generation=training_bridge.deployed_generation(),
             candidate_generation=training_bridge.deployed_generation(),
+            auto_paused=False,
+            overload_streak=0,
+            overload_events=0,
+            last_overload_reason="",
+            last_overload_at="",
         )
+
+    def request_stop(self) -> None:
+        """Signal all loops to stop on the next safe checkpoint."""
+        self._stop_event.set()
+
+    def run_blocking(self) -> None:
+        """Run the async loop in a dedicated thread."""
+        try:
+            asyncio.run(self.run_forever())
+        except Exception:
+            logger.exception("orchestrator loop crashed")
+            runtime_registry.update(status="error")
+
+    def _clear_overload_if_recovered(self) -> None:
+        if self._overload_streak == 0:
+            return
+        self._overload_streak = 0
+        runtime_registry.update(overload_streak=0)
+
+    def _on_overload(self, reason: str) -> None:
+        self._overload_streak += 1
+        self._overload_events += 1
+        now = datetime.now(UTC).isoformat()
+
+        snapshot = runtime_registry.snapshot()
+        current_target = int(snapshot.get("target_parallel_self_play_games", self._parallel_self_play_games))
+        new_target = max(self._overload_min_parallel_games, int(round(current_target * self._overload_backoff_factor)))
+
+        update_payload: dict[str, object] = {
+            "status": "degraded",
+            "overload_streak": self._overload_streak,
+            "overload_events": self._overload_events,
+            "last_overload_reason": reason,
+            "last_overload_at": now,
+        }
+
+        if new_target < current_target:
+            update_payload["target_parallel_self_play_games"] = new_target
+
+        if self._overload_streak >= self._overload_pause_after_consecutive:
+            update_payload["paused"] = True
+            update_payload["auto_paused"] = True
+            update_payload["status"] = "paused"
+
+        runtime_registry.update(**update_payload)
 
     def _set_parallel_self_play_games(self, count: int) -> None:
         count = max(1, min(64, int(count)))
@@ -316,7 +381,7 @@ class Orchestrator:
         results: list[SelfPlayResult] = []
         pending = tasks
         while pending:
-            if bool(runtime_registry.snapshot().get("paused", False)):
+            if self._stop_event.is_set() or bool(runtime_registry.snapshot().get("paused", False)):
                 for process, conn, worker_id in pending:
                     with contextlib.suppress(Exception):
                         conn.close()
@@ -446,7 +511,7 @@ class Orchestrator:
         ema_game_rate: float = 0.0
         EMA = 0.1
 
-        while True:
+        while not self._stop_event.is_set():
             snapshot = runtime_registry.snapshot()
             target_parallel = int(snapshot.get("target_parallel_self_play_games", self._parallel_self_play_games))
             if target_parallel != self._parallel_self_play_games:
@@ -462,6 +527,12 @@ class Orchestrator:
             t0 = time.perf_counter()
             games = await self._run_self_play_cycle()
             batch_ms = (time.perf_counter() - t0) * 1000.0
+
+            if self._overload_guard_enabled and batch_ms > self._overload_max_self_play_cycle_ms:
+                self._on_overload(f"self_play_cycle_ms={batch_ms:.1f}")
+            else:
+                self._clear_overload_if_recovered()
+
             total_moves = 0
             total_game_ms = 0.0
             total_heuristic_moves = 0
@@ -508,6 +579,12 @@ class Orchestrator:
             runtime_registry.update(status="training")
             train_steps_per_cycle = self._steps_per_cycle
             last_metrics, train_elapsed = await asyncio.to_thread(self._run_training_steps, train_steps_per_cycle)
+
+            if self._overload_guard_enabled and train_elapsed > self._overload_max_training_block_seconds:
+                self._on_overload(f"training_block_s={train_elapsed:.2f}")
+            else:
+                self._clear_overload_if_recovered()
+
             sps = train_steps_per_cycle / max(train_elapsed, 1e-6)
             ema_train_sps = ema_train_sps * (1 - EMA) + sps * EMA if ema_train_sps else sps
             if last_metrics is not None:
@@ -566,3 +643,5 @@ class Orchestrator:
 
             runtime_registry.update(status="idle")
             await asyncio.sleep(0.05)
+
+        runtime_registry.update(status="stopped", active_games=[])

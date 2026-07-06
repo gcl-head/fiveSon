@@ -82,6 +82,20 @@ webplay:
   model_switch_interval_steps: 200
   human_game_priority_weight: 10.0
 
+overload_guard:
+  enabled: true
+  max_self_play_cycle_ms: 5000
+  max_training_block_seconds: 18.0
+  parallel_backoff_factor: 0.5
+  min_parallel_games: 4
+  pause_after_consecutive: 3
+
+backend_guard:
+  check_interval_seconds: 3.0
+  request_timeout_seconds: 1.5
+  fail_threshold: 3
+  restart_grace_seconds: 8.0
+
 curriculum:
   enabled: true
   stages:

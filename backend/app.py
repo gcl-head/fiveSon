@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Thread
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
@@ -28,13 +28,13 @@ orch = Orchestrator(CONFIG_PATH)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    task = asyncio.create_task(orch.run_forever())
+    worker = Thread(target=orch.run_blocking, name="orchestrator-loop", daemon=True)
+    worker.start()
     try:
         yield
     finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        orch.request_stop()
+        await asyncio.to_thread(worker.join, 5.0)
 
 
 app = FastAPI(title=app_cfg.project_name, lifespan=lifespan)

@@ -43,6 +43,11 @@ class RuntimeState:
     model_policy_moves: int = 0
     heuristic_bootstrap_games: int = 0
     quick_eval_games: list[dict[str, Any]] = field(default_factory=list)
+    auto_paused: bool = False
+    overload_streak: int = 0
+    overload_events: int = 0
+    last_overload_reason: str = ""
+    last_overload_at: str = ""
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
