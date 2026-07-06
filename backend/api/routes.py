@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -59,10 +61,15 @@ def set_parallel_games(count: int) -> dict[str, object]:
     if count not in allowed:
         raise HTTPException(status_code=400, detail=f"parallel count must be one of {sorted(allowed)}")
 
-    runtime_registry.update(target_parallel_self_play_games=count)
+    override_until = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
+    runtime_registry.update(
+        target_parallel_self_play_games=count,
+        manual_parallel_override_until=override_until,
+    )
     return {
         "message": "parallel self-play target updated",
         "target_parallel_self_play_games": count,
+        "manual_parallel_override_until": override_until,
     }
 
 

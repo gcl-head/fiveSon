@@ -55,6 +55,7 @@ class SelfPlayWorker:
         self.heuristic_mix_ratio = float(max(0.0, min(1.0, heuristic_mix_ratio)))
         self.prune_keep_ratio = float(max(0.2, min(1.0, prune_keep_ratio)))
         self._played_games = 0
+        self._opening_random_moves = 0
         # Worker-local RNG avoids all parallel games sharing identical random sequence.
         self.rng = np.random.default_rng(seed=int(time.time_ns() % (2**32)) + worker_id * 9973)
 
@@ -176,7 +177,7 @@ class SelfPlayWorker:
         force_heuristic = (
             self.model_move_fn is None
             or self._played_games < self.bootstrap_games
-            or move_count < self.random_opening_moves
+            or move_count < self._opening_random_moves
         )
 
         if force_heuristic or float(self.rng.random()) < self.exploration_epsilon:
@@ -197,6 +198,10 @@ class SelfPlayWorker:
         trajectory: list[tuple[np.ndarray, np.ndarray, int]] = []
         heuristic_moves = 0
         model_moves = 0
+        if self.random_opening_moves > 0:
+            self._opening_random_moves = int(self.rng.integers(1, self.random_opening_moves + 1))
+        else:
+            self._opening_random_moves = 0
 
         if self.progress_cb is not None:
             self.progress_cb(self.worker_id, state.board.copy(), 0, state.winner, False, 0.0)

@@ -40,6 +40,12 @@ Recommended for production-like long runs (auto health-check and restart):
 python scripts/backend_guard.py
 ```
 
+Behavior defaults for long-running stability:
+
+- Overload guard will back off self-play parallelism first and will not auto-pause by default.
+- Watchdog monitors both `/api/health` and `/api/status` progress.
+- If runtime is auto-paused for too long or training progress stalls, watchdog triggers recovery (resume or restart).
+
 Then open `http://127.0.0.1:8000` to access the control center.
 
 - The orchestrator loop auto-starts with the backend process.

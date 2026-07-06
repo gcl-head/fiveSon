@@ -63,9 +63,16 @@ class Orchestrator:
         self._overload_max_training_block_seconds = float(overload_cfg.get("max_training_block_seconds", 18.0))
         self._overload_backoff_factor = float(overload_cfg.get("parallel_backoff_factor", 0.5))
         self._overload_min_parallel_games = max(1, int(overload_cfg.get("min_parallel_games", 4)))
-        self._overload_pause_after_consecutive = max(1, int(overload_cfg.get("pause_after_consecutive", 3)))
+        self._overload_pause_after_consecutive = max(0, int(overload_cfg.get("pause_after_consecutive", 0)))
+        self._overload_auto_pause_enabled = bool(overload_cfg.get("auto_pause_enabled", False))
+        self._overload_auto_resume_after_seconds = max(0.0, float(overload_cfg.get("auto_resume_after_seconds", 45.0)))
+        self._manual_parallel_override_seconds = max(
+            0,
+            int(overload_cfg.get("manual_parallel_override_seconds", 600)),
+        )
         self._overload_streak = 0
         self._overload_events = 0
+        self._auto_pause_since_monotonic: float | None = None
         self.trainer = Trainer(
             self.replay,
             board_size=self.app_cfg.board_size,
@@ -119,6 +126,9 @@ class Orchestrator:
             min_replay_size_before_train=self._min_replay_size_before_train,
             parallel_self_play_games=self._parallel_self_play_games,
             target_parallel_self_play_games=self._parallel_self_play_games,
+            manual_parallel_override_until=(
+                datetime.now(UTC).isoformat() if self._manual_parallel_override_seconds > 0 else ""
+            ),
             heuristic_bootstrap_games=int(self.raw_cfg.get("self_play", {}).get("heuristic_bootstrap_games", 80)),
             quick_eval_games=[],
             deployed_generation=training_bridge.deployed_generation(),
@@ -148,6 +158,49 @@ class Orchestrator:
         self._overload_streak = 0
         runtime_registry.update(overload_streak=0)
 
+    def _maybe_auto_resume(self, snapshot: dict[str, object]) -> bool:
+        """Auto-resume only when pause was triggered by overload guard."""
+        if not bool(snapshot.get("paused", False)):
+            self._auto_pause_since_monotonic = None
+            return False
+
+        if not bool(snapshot.get("auto_paused", False)):
+            return False
+
+        if self._overload_auto_resume_after_seconds <= 0:
+            return False
+
+        now = time.monotonic()
+        if self._auto_pause_since_monotonic is None:
+            self._auto_pause_since_monotonic = now
+            return False
+
+        if now - self._auto_pause_since_monotonic < self._overload_auto_resume_after_seconds:
+            return False
+
+        self._auto_pause_since_monotonic = None
+        self._overload_streak = 0
+        runtime_registry.update(
+            paused=False,
+            auto_paused=False,
+            overload_streak=0,
+            status="self_play",
+            last_overload_reason="auto_resumed_after_overload",
+        )
+        return True
+
+    def _is_manual_parallel_override_active(self, snapshot: dict[str, object]) -> bool:
+        raw_until = str(snapshot.get("manual_parallel_override_until", "") or "")
+        if not raw_until:
+            return False
+        try:
+            until = datetime.fromisoformat(raw_until)
+        except ValueError:
+            return False
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=UTC)
+        return datetime.now(UTC) < until.astimezone(UTC)
+
     def _on_overload(self, reason: str) -> None:
         self._overload_streak += 1
         self._overload_events += 1
@@ -165,13 +218,20 @@ class Orchestrator:
             "last_overload_at": now,
         }
 
-        if new_target < current_target:
+        manual_override_active = self._is_manual_parallel_override_active(snapshot)
+        if new_target < current_target and not manual_override_active:
             update_payload["target_parallel_self_play_games"] = new_target
 
-        if self._overload_streak >= self._overload_pause_after_consecutive:
+        should_auto_pause = (
+            self._overload_auto_pause_enabled
+            and self._overload_pause_after_consecutive > 0
+            and self._overload_streak >= self._overload_pause_after_consecutive
+        )
+        if should_auto_pause:
             update_payload["paused"] = True
             update_payload["auto_paused"] = True
             update_payload["status"] = "paused"
+            self._auto_pause_since_monotonic = time.monotonic()
 
         runtime_registry.update(**update_payload)
 
@@ -199,8 +259,8 @@ class Orchestrator:
             board_size=self.app_cfg.board_size,
             win_length=self.app_cfg.win_length,
             temperature=float(self.raw_cfg.get("mcts", {}).get("temperature", 1.0)),
-            random_opening_moves=int(self_play_cfg.get("random_opening_moves", 2)),
-            exploration_epsilon=float(self_play_cfg.get("exploration_epsilon", 0.08)),
+            random_opening_moves=int(self_play_cfg.get("random_opening_moves", 4)),
+            exploration_epsilon=float(self_play_cfg.get("exploration_epsilon", 0.12)),
             bootstrap_games=int(self_play_cfg.get("heuristic_bootstrap_games", 80)),
             heuristic_mix_ratio=float(self_play_cfg.get("heuristic_mix_ratio", 0.25)),
             prune_keep_ratio=float(self_play_cfg.get("heuristic_prune_keep_ratio", 0.6)),
@@ -381,7 +441,21 @@ class Orchestrator:
         results: list[SelfPlayResult] = []
         pending = tasks
         while pending:
-            if self._stop_event.is_set() or bool(runtime_registry.snapshot().get("paused", False)):
+            loop_snapshot = runtime_registry.snapshot()
+            target_parallel = int(loop_snapshot.get("target_parallel_self_play_games", self._parallel_self_play_games))
+            if target_parallel != self._parallel_self_play_games:
+                for process, conn, worker_id in pending:
+                    with contextlib.suppress(Exception):
+                        conn.close()
+                    if process.is_alive():
+                        process.terminate()
+                    process.join(timeout=0.2)
+                    self._clear_active_game(worker_id)
+                runtime_registry.update(active_games=[])
+                self._set_parallel_self_play_games(target_parallel)
+                return results
+
+            if self._stop_event.is_set() or bool(loop_snapshot.get("paused", False)):
                 for process, conn, worker_id in pending:
                     with contextlib.suppress(Exception):
                         conn.close()
@@ -516,6 +590,9 @@ class Orchestrator:
             target_parallel = int(snapshot.get("target_parallel_self_play_games", self._parallel_self_play_games))
             if target_parallel != self._parallel_self_play_games:
                 self._set_parallel_self_play_games(target_parallel)
+
+            if self._maybe_auto_resume(snapshot):
+                snapshot = runtime_registry.snapshot()
 
             if bool(snapshot.get("paused", False)):
                 runtime_registry.update(status="paused")

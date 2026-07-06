@@ -69,8 +69,11 @@ function updateStatus(data) {
   if (policyNode) {
     const currentModel = `${data.current_model || "bootstrap"}`;
     const bestModel = `${data.best_model || "bootstrap"}`;
+    const deployedGeneration = Number(data.deployed_generation || 0);
+    const candidateGeneration = Number(data.candidate_generation || deployedGeneration);
+    const trainingStep = Number(data.training_step || 0);
     if (currentModel !== "bootstrap") {
-      policyNode.textContent = `对战策略: 已恢复 ${currentModel}，最佳模型 ${bestModel}`;
+      policyNode.textContent = `对战策略: 已部署 g${deployedGeneration}（${bestModel}）| 候选 g${candidateGeneration}（${currentModel}）| step ${trainingStep}`;
     } else {
       policyNode.textContent = "对战策略: 等待恢复训练模型";
     }

@@ -38,6 +38,7 @@ class RuntimeState:
     candidate_generation: int = 0
     parallel_self_play_games: int = 0
     target_parallel_self_play_games: int = 0
+    manual_parallel_override_until: str = ""
     active_games: list[dict[str, Any]] = field(default_factory=list)
     heuristic_policy_moves: int = 0
     model_policy_moves: int = 0
